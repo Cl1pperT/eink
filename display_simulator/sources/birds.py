@@ -48,7 +48,10 @@ class BirdsSource:
                     try:
                         return self._capture_avian(repository, value, context)
                     except RuntimeError:
-                        if value.rstrip("/") == "http://birdnet.local":
+                        if (
+                            value.rstrip("/") == "http://birdnet.local"
+                            and context.options.get("allow_demo_fallback", True)
+                        ):
                             return self._capture_avian_demo(repository, context, live_unavailable=True)
                         raise
                 return self._capture_page(value, context)
@@ -139,7 +142,8 @@ class BirdsSource:
                 return self._capture_avian_demo(repository, context)
             except RuntimeError:
                 # A launch without Playwright still has a no-browser fallback.
-                pass
+                if not context.options.get("allow_demo_fallback", True):
+                    raise
         self.name = "Birds · synthetic offline fallback"
         w, h = context.width, context.height
         image = Image.new("RGB", (w, h), "#f5efdc")

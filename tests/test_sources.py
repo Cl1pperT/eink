@@ -132,6 +132,37 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(image.size, (1600, 1200))
         self.assertIn("birdnet.local unavailable", source.name)
 
+    def test_strict_bird_capture_does_not_substitute_demo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "frame").mkdir()
+            (repo / "frame" / "shoot.py").write_text("# marker\n")
+            context = RenderContext(
+                Orientation.LANDSCAPE,
+                datetime(2026, 7, 10, 12),
+                options={
+                    "avian_repo": str(repo),
+                    "bird_source": "http://birdnet.local",
+                    "demo_birds": False,
+                    "allow_demo_fallback": False,
+                },
+            )
+            source = BirdsSource()
+            with patch.object(source, "_capture_avian", side_effect=RuntimeError("offline")):
+                with patch.object(source, "_capture_avian_demo") as demo:
+                    with self.assertRaisesRegex(RuntimeError, "offline"):
+                        source.render(context)
+            demo.assert_not_called()
+
+    def test_strict_starmap_requires_live_integration(self):
+        context = RenderContext(
+            Orientation.LANDSCAPE,
+            datetime(2026, 7, 10, 22),
+            options={"allow_demo_fallback": False, "inkystarmap_repo": ""},
+        )
+        with self.assertRaisesRegex(RuntimeError, "explicit inkystarmap checkout"):
+            StarMapSource().render(context)
+
     def test_live_weather_missing_integration_is_clear(self):
         context = RenderContext(offline=False)
         with self.assertRaisesRegex(RuntimeError, "weather_frame checkout not found"):

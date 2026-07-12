@@ -1,0 +1,56 @@
+[runtime]
+strict_sources = true
+
+[display]
+orientation = "landscape"
+fit_mode = "crop"
+
+[location]
+name = "Denver, Colorado"
+latitude = 39.7392
+longitude = -104.9903
+direction = 180
+timezone = "America/Denver"
+
+[schedule]
+weather_start = "06:00"
+birds_start = "10:00"
+star_start = "20:00"
+
+[conversion]
+dithering = true
+method = "floyd-steinberg"
+saturation = 0.6
+blue_bias = 0.5
+
+[repositories]
+avian_weather = ""
+inkystarmap = ""
+
+[sources]
+bird = "http://birdnet.local"
+bird_demo = false
+starmap = ""
+photo = ""
+avian_python = ""
+use_inkystarmap = true
+dark_starmap = true
+
+[weather]
+offline = false
+style = "woodblock"
+scene_source = "auto"
+environment = "auto"
+caption = false
+units = "imperial"
+country_code = ""
+timeout = 30.0
+condition = "clear"
+
+[photo]
+rotation = 0
+caption = ""
+
+[output]
+directory = "runtime_output"
+write_rgb = true

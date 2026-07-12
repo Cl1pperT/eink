@@ -28,6 +28,7 @@ class StarMapSource:
 
     def render(self, context: RenderContext) -> Image.Image:
         value = str(context.options.get("starmap_source", "")).strip()
+        allow_demo_fallback = bool(context.options.get("allow_demo_fallback", True))
         if value:
             path = Path(value).expanduser()
             if path.is_file():
@@ -40,6 +41,11 @@ class StarMapSource:
                 image = self._render_inkystarmap(context)
                 self.name = "Star Map · live inkystarmap/Starplot render"
                 return image
+            if not allow_demo_fallback:
+                raise RuntimeError(
+                    "inkystarmap rendering needs the optional Starplot dependencies; "
+                    "install requirements-integrations.txt"
+                )
             sample = repository / "inkystarmap2025.jpg"
             if sample.is_file():
                 with Image.open(sample) as image:
@@ -49,6 +55,11 @@ class StarMapSource:
             raise RuntimeError(
                 "inkystarmap checkout found, but Starplot is not installed and its sample image is missing; "
                 "install requirements-integrations.txt"
+            )
+        if not allow_demo_fallback:
+            raise RuntimeError(
+                "Live star-map rendering requires an explicit inkystarmap checkout "
+                "and the Starplot dependencies"
             )
         self.name = "Star Map · offline Pillow fallback"
         return self._demo(context)

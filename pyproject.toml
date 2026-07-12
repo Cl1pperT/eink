@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eink-display-runtime"
+version = "0.1.0"
+description = "Headless Raspberry Pi renderer and macOS simulator for a Spectra 6 e-ink frame"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "Pillow>=10,<13",
+]
+
+[project.optional-dependencies]
+integrations = [
+  "playwright>=1.45",
+  "starplot>=0.16.1",
+  "astral>=3.2",
+  "pytz>=2025.2",
+  "pyarrow>=20,<21",
+]
+
+[project.scripts]
+eink-display = "display_runtime.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["display_runtime*", "display_simulator*"]
+
+[tool.setuptools.package-data]
+display_runtime = ["defaults.toml", "config.example.toml"]
+display_simulator = ["defaults.toml"]
