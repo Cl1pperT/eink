@@ -1,0 +1,89 @@
+diff --git a/README.md b/README.md
+index cf120ea..3d7d7d0 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # AvianVisitors
+ 
+-*A live bird collage from your window.*
++*A live, rarity-weighted bird collage from your window, with optional e-ink bird and weather displays.*
+ 
+ See it running at [bird.onethreenine.net](https://bird.onethreenine.net).
+ 
+@@ -8,6 +8,20 @@ See it running at [bird.onethreenine.net](https://bird.onethreenine.net).
+ 
+ ---
+ 
++## What it does
++
++- Runs BirdNET-Pi on a Raspberry Pi and turns detections into a responsive illustrated collage.
++- Defaults to the last seven days, with `1H`, `12H`, `24H`, `7D`, and `ALL` views.
++- Sizes each bird from `calls in the selected window × local rarity weight`, so repeatedly heard uncommon visitors can outrank everyday birds. Local rarity is based on lifetime calls per observed day and is capped at `12×`.
++- Includes stats, a life-list atlas, species details, recordings, and the BirdNET-Pi administration tools in one web interface.
++- Ships 498 illustrations for 249 species, including perched and flight poses, plus tools for generating regional additions.
++- Can drive a landscape or portrait 13.3-inch Spectra 6 e-ink display from the live mic, BirdWeather, or an already-rendered image.
++- Includes a separate morning weather-art renderer using real Open-Meteo forecasts, generated watercolor scenes, and a procedural scene fallback.
++
++The bird display and weather display share the repository but keep separate configuration, state, and timers. Only one timer should own a physical panel at a time.
++
++---
++
+ ## BOM
+ 
+ | Qty | Description | Price | Link | Notes |
+@@ -17,7 +31,7 @@ See it running at [bird.onethreenine.net](https://bird.onethreenine.net).
+ | 1 | USB lavalier microphone | $16.95 | [Amazon](https://amzn.to/4vLSaMK) | |
+ | 1 | Pi power supply | ~$10 | - | |
+ 
+-Optional: a [Gemini API key](https://aistudio.google.com/apikey) to restyle illustrations, an [eBird API key](https://ebird.org/api/keygen) to filter species by region.
++Optional: a [Gemini API key](https://aistudio.google.com/apikey) to restyle bird illustrations or pre-generate weather scenes, and an [eBird API key](https://ebird.org/api/keygen) to filter species by region or fill sparse BirdWeather locations.
+ 
+ ### Kits
+ 
+@@ -93,8 +107,8 @@ avian/                  # everything we add to BirdNET-Pi
+ ├── api/                # PHP shims served by BirdNET-Pi's PHP-FPM
+ ├── scripts/            # generate -> cutout -> masks pipeline + prompt
+ └── forwarding/         # optional HA / MQTT / Cloudflare configs
+-frame/                  # optional e-ink wall display
+-weather_frame/          # optional procedural weather-art display
++frame/                  # optional landscape/portrait e-ink bird display
++weather_frame/          # optional Open-Meteo weather-art display + macOS preview app
+ ```
+ 
+ Everything outside `avian/`, `frame/`, and `weather_frame/` is upstream BirdNET-Pi.
+@@ -103,9 +117,33 @@ Everything outside `avian/`, `frame/`, and `weather_frame/` is upstream BirdNET-
+ 
+ ## Wall frame
+ 
+-An optional e-ink frame mirrors the last seven days of birds onto a panel by your window. Build it from [`frame/`](frame/README.md). It can run off your own BirdNET mic, or standalone from BirdWeather data for any ZIP code with no mic at all.
++An optional e-ink frame mirrors the seven-day collage onto a 13.3-inch Spectra 6 panel. The layout responds directly to the panel orientation, including a full-width landscape arrangement. It can render from your BirdNET mic, run standalone from BirdWeather for a ZIP code, or fetch an already-rendered image. Build and installation instructions are in [`frame/README.md`](frame/README.md).
++
++For BirdNET-backed collages, bird area is ranked by the rarity-weighted score described above. Hovering a bird in the web viewer shows its call count, rarity multiplier, and resulting size score.
++
++## Weather frame
++
++[`weather_frame/`](weather_frame/README.md) is an opt-in morning forecast display built on the same panel support. It makes real Open-Meteo geocoding and forecast calls, selects a pre-generated watercolor scene when one exists, and otherwise renders a deterministic procedural scene. It does not call an image model at display time.
++
++On macOS, the Tkinter preview app lets you choose a location, scene source, environment, caption setting, and fixture/live weather before touching e-ink hardware:
++
++```bash
++python3 -m venv weather_frame/.venv
++weather_frame/.venv/bin/pip install -r weather_frame/requirements.txt
++weather_frame/.venv/bin/python -m weather_frame.preview_app
++```
++
++The preview app loads its default location and artwork settings from `~/.weatherframe/config.toml`. Full setup, scene-generation, timer, and panel-safety instructions are in [`weather_frame/README.md`](weather_frame/README.md).
++
++## Tests
++
++The weather renderer and its preview integration use the standard-library test runner:
++
++```bash
++python3 -m unittest discover -s weather_frame/tests -v
++```
+ 
+-For a separate, opt-in morning forecast scene, see [`weather_frame/`](weather_frame/README.md). Its procedural Pillow renderer and state are isolated from the bird display.
++The frame utilities also support non-destructive PNG previews before a physical refresh; see each component README for its preview command.
+ 
+ ---
+ 

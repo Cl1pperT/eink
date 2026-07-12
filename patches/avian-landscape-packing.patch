@@ -1,0 +1,72 @@
+--- a/frame/shoot.py
++++ b/frame/shoot.py
+@@ -142,7 +142,7 @@
+     return handler
+ 
+ 
+-def _make_js_handler(xbias, ybias, count_exp, pad, auth, misses):
++def _make_js_handler(xbias, ybias, count_exp, pad, auth, misses, packing_budget=None):
+     """Rewrite the collage tunables inside the page's apt.js at capture time."""
+     def handler(route):
+         try:
+@@ -155,6 +155,13 @@
+                 js, n = re.subn(pat, repl, js)
+                 if not n:
+                     misses.append(pat)
++            if packing_budget is not None:
++                pattern = (r"packingBudgetFrac:\s*n <= 4\s*\?\s*[\d.]+\s*:\s*"
++                           r"n <= 12\s*\?\s*[\d.]+\s*:\s*"
++                           r"n <= 24\s*\?\s*[\d.]+\s*:\s*[\d.]+,")
++                js, n = re.subn(pattern, f"packingBudgetFrac: {packing_budget},", js)
++                if not n:
++                    misses.append(pattern)
+             route.fulfill(status=200, content_type="application/javascript; charset=utf-8", body=js)
+         except Exception as e:
+             print(f"apt.js rewrite skipped: {e}", file=sys.stderr)
+@@ -166,8 +173,10 @@
+           headline_px=42, eyebrow_px=18, lowercase=False,
+           mat=0.04, collage_vh=52, cluster_xbias=1.0, cluster_ybias=1.2,
+           count_exp=0.4, cluster_pad=1, small_floor=0.04, window_hours=None,
+-          timeout_ms=45000, user=None, password=None, species=None, cutout_base=None,
++          packing_budget=None, timeout_ms=45000, user=None, password=None, species=None, cutout_base=None,
+           cutout_local=None):
++    if packing_budget is not None and not 0 < packing_budget <= 0.9:
++        raise ValueError("packing_budget must be greater than 0 and at most 0.9")
+     pad_side, pad_top, pad_bottom = int(vw * mat), int(vh * mat * 0.92), int(vh * mat)
+     auth = "Basic " + base64.b64encode(f"{user}:{password or ''}".encode()).decode() if user else None
+ 
+@@ -180,7 +189,8 @@
+             page = browser.new_context(**ctx_kw).new_page()
+             misses = []
+             page.route("**/birdnet-api.php**", _make_api_handler(small_floor, window_hours, auth, species))
+-            page.route("**/apt.js*", _make_js_handler(cluster_xbias, cluster_ybias, count_exp, cluster_pad, auth, misses))
++            page.route("**/apt.js*", _make_js_handler(cluster_xbias, cluster_ybias, count_exp,
++                                                       cluster_pad, auth, misses, packing_budget))
+             if cutout_base:
+                 page.route("**/cutout.php*", _make_cutout_handler(cutout_base, cutout_local))
+ 
+@@ -266,6 +276,8 @@
+     ap.add_argument("--cluster-ybias", type=float, default=1.2)
+     ap.add_argument("--count-exp", type=float, default=None,
+                     help="count-to-size exponent; default 0.4 for the mic, 1.0 for --bird-weather")
++    ap.add_argument("--packing-budget", type=float,
++                    help="override the collage's soft bird-area fraction (0 to 0.9)")
+     ap.add_argument("--cluster-pad", type=int, default=1)
+     ap.add_argument("--small-floor", type=float, default=0.04)
+     ap.add_argument("--window-hours", type=int)
+@@ -298,6 +310,7 @@
+         look.update(vw=a.width, vh=a.height, dsf=a.dsf, mat=a.mat, collage_vh=a.collage_vh,
+                     cluster_xbias=a.cluster_xbias, cluster_ybias=a.cluster_ybias,
+                     cluster_pad=a.cluster_pad, small_floor=a.small_floor, lowercase=a.lowercase,
++                    packing_budget=a.packing_budget,
+                     window_hours=a.window_hours, user=a.user, password=a.password)
+         try:
+             shoot_birdweather(a.out, species, title=a.title, subtitle=a.subtitle,
+@@ -317,6 +330,7 @@
+               mat=a.mat, collage_vh=a.collage_vh, cluster_xbias=a.cluster_xbias,
+               cluster_ybias=a.cluster_ybias, count_exp=count_exp, cluster_pad=a.cluster_pad,
+               small_floor=a.small_floor,
++              packing_budget=a.packing_budget,
+               window_hours=a.window_hours, timeout_ms=a.timeout, user=a.user, password=a.password)
+     except Exception as e:
+         print(f"shoot failed: {e}", file=sys.stderr)

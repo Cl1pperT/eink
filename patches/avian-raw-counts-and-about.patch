@@ -1,0 +1,80 @@
+diff --git a/avian/frontend/index.html b/avian/frontend/index.html
+--- a/avian/frontend/index.html
++++ b/avian/frontend/index.html
+@@ -189,7 +189,7 @@
+     <button type="button" class="modal-close" data-close="1" aria-label="close">×</button>
+     <p class="about-eyebrow">your birds</p>
+     <h2 id="aboutTitle">The birds outside your window</h2>
+-    <p class="about-body">A tiny microphone identifies every passing bird with Cornell's <a href="https://birdnet.cornell.edu/" target="_blank" rel="noopener">BirdNET</a>. Each species shows up as an illustration in the collage, sized by how often it's been heard.</p>
++    <p class="about-body">A tiny microphone identifies every passing bird with Cornell's <a href="https://birdnet.cornell.edu/" target="_blank" rel="noopener">BirdNET</a>. Each species shows up as an illustration in the collage, sized by its calls in the selected window multiplied by how rare it is locally.</p>
+     <button type="button" class="about-explore" data-close="1">explore the birds →</button>
+     </div>
+ </div>
+diff --git a/frame/config.example.toml b/frame/config.example.toml
+--- a/frame/config.example.toml
++++ b/frame/config.example.toml
+@@ -31,7 +31,7 @@ shoot_subtitle = "Heard This Week"
+ # shoot_eyebrow_px = 18
+ # shoot_lowercase = false
+ # shoot_mat = 0.04
+-# shoot_small_floor = 0.04
++# shoot_small_floor = 0.0  # optional legacy count floor; keep 0 for exact calls × rarity sizing
+ # shoot_count_exp = 0.65   # tile size vs call count; higher = the loudest birds dominate more
+ 
+ # --- Panel ------------------------------------------------------------------
+diff --git a/frame/display.py b/frame/display.py
+--- a/frame/display.py
++++ b/frame/display.py
+@@ -50,7 +50,7 @@ DEFAULTS = {
+     "shoot": False,         # or capture inline (needs a browser; the Zero 2 W handles it)
+     "shoot_title": None, "shoot_subtitle": "Heard This Week",
+     "shoot_headline_px": 42, "shoot_eyebrow_px": 18, "shoot_lowercase": False,
+-    "shoot_mat": 0.04, "shoot_small_floor": 0.04, "shoot_count_exp": 0.65,
++    "shoot_mat": 0.04, "shoot_small_floor": 0.0, "shoot_count_exp": 0.65,
+     "mat": 0.0,             # extra global shrink of the content inside the A5 opening
+     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
+     "saturation": 0.6,
+diff --git a/frame/shoot.py b/frame/shoot.py
+--- a/frame/shoot.py
++++ b/frame/shoot.py
+@@ -4,6 +4,6 @@ Loads the real site (the LAN default http://birdnet.local, or a forwarded
+ public URL) at a portrait viewport, hides the controls, sets the frame
+ titles, and rewrites a few of the page's own apt.js tunables at capture time
+-(cluster bias, count-to-size exponent, a rare-bird floor). The result is the
++(cluster bias, count-to-size exponent, an optional rare-bird floor). The result is the
+ actual website, framed for the wall, with no changes to AvianVisitors.
+ 
+ Needs a real headless browser, so it runs on any 64-bit capable machine, NOT
+@@ -73,9 +73,10 @@ def _safe_continue(route):
+ 
+ 
+ def _make_api_handler(floor_frac, window_hours, auth, species=None):
+-    """Re-window action=recent (to preview busy days) and floor the rarest
+-    counts so the packer draws them a little larger. With `species` set
+-    (--bird-weather), serve that list for recent and an empty body for the
++    """Re-window action=recent (to preview busy days). A nonzero legacy
++    `floor_frac` can inflate low counts, but it defaults off so the collage's
++    calls × rarity score always uses actual detections. With `species` set
++    (--bird-weather), serve that list for recent and an empty body for the
+     other views, which have no backend in that mode."""
+     def handler(route):
+         req = route.request
+@@ -172,7 +173,7 @@ def _make_js_handler(xbias, ybias, count_exp, pad, auth, misses, packing_budget
+ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
+           headline_px=42, eyebrow_px=18, lowercase=False,
+           mat=0.04, collage_vh=52, cluster_xbias=1.0, cluster_ybias=1.2,
+-          count_exp=0.4, cluster_pad=1, small_floor=0.04, window_hours=168,
++          count_exp=0.4, cluster_pad=1, small_floor=0.0, window_hours=168,
+           packing_budget=None, timeout_ms=45000, user=None, password=None, species=None, cutout_base=None,
+           cutout_local=None):
+     if packing_budget is not None and not 0 < packing_budget <= 0.9:
+@@ -279,7 +280,8 @@ def main():
+     ap.add_argument("--packing-budget", type=float,
+                     help="override the collage's soft bird-area fraction (0 to 0.9)")
+     ap.add_argument("--cluster-pad", type=int, default=1)
+-    ap.add_argument("--small-floor", type=float, default=0.04)
++    ap.add_argument("--small-floor", type=float, default=0.0,
++                    help="legacy low-count floor fraction (default: 0, preserving actual call counts)")
+     ap.add_argument("--window-hours", type=int, default=168,
+                     help="detection window in hours (default: 168 / seven days)")
+     ap.add_argument("--bird-weather", action="store_true",

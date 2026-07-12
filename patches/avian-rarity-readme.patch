@@ -1,0 +1,25 @@
+--- a/frame/README.md
++++ b/frame/README.md
+@@ -1,9 +1,21 @@
+ # AvianVisitors e-ink frame
+ 
+-*The last 24h of birds, framed on the wall by your window.*
++*The last seven days of birds, framed on the wall by your window.*
+ 
+ A [Pimoroni Inky Impression 13.3"](https://amzn.to/4xlAWr3) (Spectra 6) mirroring the live collage. A Pi screenshots the site, mats it onto an A5 opening, and pushes to the panel, refreshing only when the birds change. Build one of your own at [theodore.net/projects/AvianVisitors#frame-ous](https://theodore.net/projects/AvianVisitors/#frame-ous).
+ 
++The collage defaults to a seven-day window and sizes birds with:
++
++```text
++size score = calls in the selected window × local rarity weight
++```
++
++Local rarity is calculated from the species' lifetime calls per day since its
++first detection. A bird heard at least daily has a 1× weight; less frequent
++visitors receive progressively larger weights up to a 12× cap. The cap keeps an
++old one-off from dominating, while a rare visitor heard repeatedly this week can
++appear larger than an everyday species.
++
+ ![](https://theodore.net/assets/images/AvianVisitors/final.jpg)
+ 
+ ---
