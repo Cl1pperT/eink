@@ -4,9 +4,9 @@
 the same weather, AvianVisitors, inkystarmap, sizing, and Spectra 6 conversion
 code as the desktop simulator, but it never imports Tkinter or opens a window.
 
-The first milestone produces validated six-color PNG artifacts and atomically
-maintains one last-known-good frame per mode. It does not yet expose an HTTP
-endpoint or encode the Seeed EE02 4bpp wire buffer.
+The runtime produces both a validated six-color PNG and the exact raw Seeed
+EE02/T133A01 4bpp backing buffer, then atomically maintains one last-known-good
+frame per mode. It does not yet expose the artifacts over HTTP.
 
 ## Raspberry Pi installation
 
@@ -72,6 +72,8 @@ The `render` command accepts:
 - `--at`/`--when` with an ISO-8601 time. A time without an offset is interpreted
   in `location.timezone`.
 - `--orientation landscape|portrait` and `--fit crop|fit|stretch` overrides.
+- `--landscape-rotation clockwise|counter-clockwise` to match the display's
+  physical mounting.
 - `--output-dir`, `--no-rgb`, and `--force` artifact overrides.
 - `--json` for a stable machine-readable result.
 - `--allow-demo` for a manual development render only.
@@ -92,18 +94,27 @@ frames/
     ├── current.json
     └── frames/
         ├── <pixel-checksum>.png
-        └── <pixel-checksum>.rgb.png
+        ├── <pixel-checksum>.rgb.png
+        └── <wire-checksum>.ee02
 ```
 
 The native PNG is exactly 1600×1200 in landscape or 1200×1600 in portrait and
-contains only the six supported RGB values. `current.json` records dimensions,
-palette, pixel checksum, PNG file hashes, provenance, render time, and timings.
+contains only the six supported RGB values. The `.ee02` file is always exactly
+960,000 bytes: the 1200×1600 Setup510 backing sprite at four bits per pixel.
+`current.json` records dimensions, palette, pixel and wire checksums, all file
+hashes, provenance, rotation, render time, and timings.
 
 Frame files are immutable and named by their pixel checksum. A same-directory
 temporary file is flushed and atomically renamed before `current.json` becomes
 the new commit point. A render, validation, or disk-write failure therefore
 leaves the previous manifest and frame readable. Per-mode file locking prevents
 two service invocations from committing the same mode concurrently.
+
+Persistent change detection compares the final EE02 payload SHA-256, not merely
+the PNG pixels. Restarting the process retains unchanged detection, and changing
+the landscape rotation correctly creates a new physical frame even when the
+logical PNG is unchanged. A missing or corrupt cached binary is rebuilt without
+falsely reporting that the display pixels changed.
 
 The optional RGB sidecar is the normalized continuous-color source before
 Spectra conversion. It is useful for diagnostics but is not sent to hardware.
@@ -130,6 +141,26 @@ are rejected instead of silently ignored.
 Run `check` to see configuration and dependency readiness without making a
 weather request or rendering a frame.
 
+## Exact EE02 buffer contract
+
+The encoder follows Seeed_GFX's EE02 Setup510 and 4bpp `TFT_eSprite` layout:
+
+- Backing dimensions: 1200×1600, row-major.
+- Buffer length: 960,000 bytes, with no header.
+- Even backing `x`: high nibble; odd backing `x`: low nibble.
+- Driver values: black `0xF`, white `0x0`, yellow `0xB`, red `0x6`, blue
+  `0xD`, green `0x2`.
+- Clockwise landscape maps logical `(x,y)` to backing `(1199-y,x)`, matching
+  Seeed sprite rotation 1.
+- Counter-clockwise maps `(x,y)` to `(y,1599-x)`, matching rotation 3.
+- Portrait 1200×1600 is already in backing order and uses no rotation.
+
+These bytes are sprite-buffer values. Firmware should copy a completely
+downloaded and SHA-256-verified payload into `epaper.getPointer()` and then call
+`epaper.update()`. It must not rotate the already prepared payload again. The
+Seeed driver performs its own later conversion from sprite nibbles to panel
+controller transfer codes.
+
 ## Exit codes
 
 - `0`: successful render, including an unchanged frame.
@@ -140,8 +171,7 @@ weather request or rendering a frame.
 
 ## Next production layer
 
-The runtime deliberately stops at a validated native PNG. The next package
-layer will rotate and encode that image into the EE02's 960,000-byte 4bpp
-buffer, publish manifest/frame HTTP endpoints, and provide systemd units. The
-ESP32 downloader can then validate the payload hash and refresh only when the
-wire checksum changes.
+The next package layer will publish `current.json` and the `.ee02` file through
+manifest/frame HTTP endpoints and provide systemd units. The ESP32 downloader
+can then validate the declared length and SHA-256 and refresh only when the wire
+checksum changes.

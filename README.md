@@ -5,8 +5,9 @@
 The Tk-free `display_runtime` package renders weather, birds, star maps,
 uploaded photos, automatic schedules, and test patterns from a terminal or
 service. It validates native dimensions and the six-color palette, writes
-checksum-named immutable frames, and atomically maintains a last-known-good
-manifest for each mode.
+checksum-named immutable PNG and exact 960,000-byte EE02 4bpp frames, and
+atomically maintains a last-known-good manifest for each mode. Persistent
+change detection uses the final hardware payload checksum.
 
 ```bash
 python3 -m venv .venv
