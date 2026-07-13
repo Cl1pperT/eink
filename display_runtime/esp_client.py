@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from .ee02 import (
     EE02_BUFFER_HEIGHT,
     EE02_BUFFER_WIDTH,
+    EE02_NAMED_COLOR_CODES,
     EE02_PAYLOAD_BYTES,
     EE02_WIRE_FORMAT,
 )
@@ -166,6 +167,29 @@ def _validate_manifest(value: Any, mode: str) -> tuple[str, int]:
         raise ESPProtocolError("frame manifest has invalid EE02 buffer dimensions")
     if wire.get("pixel_order") != "row-major" or wire.get("nibble_order") != "even-x-high-odd-x-low":
         raise ESPProtocolError("frame manifest has an unsupported byte layout")
+    expected_color_codes = {
+        name: f"0x{code:X}" for name, code in EE02_NAMED_COLOR_CODES.items()
+    }
+    if wire.get("color_codes") != expected_color_codes:
+        raise ESPProtocolError("frame manifest has unsupported EE02 color codes")
+
+    logical = wire.get("logical_dimensions")
+    if not isinstance(logical, dict):
+        raise ESPProtocolError("frame manifest has no logical dimensions")
+    logical_size = (logical.get("width"), logical.get("height"))
+    rotation = wire.get("rotation")
+    sprite_rotation = wire.get("seeed_sprite_rotation")
+    landscape = logical_size == (EE02_BUFFER_HEIGHT, EE02_BUFFER_WIDTH) and (
+        (rotation == "clockwise" and sprite_rotation == 1)
+        or (rotation == "counter-clockwise" and sprite_rotation == 3)
+    )
+    portrait = (
+        logical_size == (EE02_BUFFER_WIDTH, EE02_BUFFER_HEIGHT)
+        and rotation == "none"
+        and sprite_rotation == 0
+    )
+    if not (landscape or portrait):
+        raise ESPProtocolError("frame manifest dimensions and rotation disagree")
 
     binary = files.get("ee02_4bpp")
     if not isinstance(binary, dict):

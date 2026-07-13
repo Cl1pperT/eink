@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from .ee02 import (
     EE02_BUFFER_HEIGHT,
     EE02_BUFFER_WIDTH,
+    EE02_NAMED_COLOR_CODES,
     EE02_PAYLOAD_BYTES,
     EE02_WIRE_FORMAT,
 )
@@ -138,6 +139,11 @@ def _validate_manifest(value: object, mode: str) -> tuple[str, str]:
         raise ArtifactUnavailable("manifest wire pixel order is invalid")
     if wire.get("nibble_order") != "even-x-high-odd-x-low":
         raise ArtifactUnavailable("manifest wire nibble order is invalid")
+    expected_color_codes = {
+        name: f"0x{code:X}" for name, code in EE02_NAMED_COLOR_CODES.items()
+    }
+    if wire.get("color_codes") != expected_color_codes:
+        raise ArtifactUnavailable("manifest wire color codes are invalid")
 
     logical_dimensions = _require_mapping(
         wire.get("logical_dimensions"), "wire.logical_dimensions"
