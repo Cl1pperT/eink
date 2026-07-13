@@ -30,9 +30,18 @@ from display_simulator.sources import (
 )
 
 from .config import RuntimeConfig
+from .ee02 import (
+    EE02_BUFFER_HEIGHT,
+    EE02_BUFFER_WIDTH,
+    EE02_NAMED_COLOR_CODES,
+    EE02_PAYLOAD_BYTES,
+    EE02_WIRE_FORMAT,
+    EncodedEE02Frame,
+    encode_ee02,
+)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CANONICAL_MODES = (
     "automatic",
     "weather",
@@ -85,7 +94,11 @@ class RuntimeArtifact:
     changed: bool
     written: bool
     checksum: str
+    wire_checksum: str
     frame_path: Path
+    wire_path: Path
+    wire_rotation: str
+    seeed_sprite_rotation: int
     rgb_path: Path | None
     manifest_path: Path
     width: int
@@ -103,6 +116,18 @@ class RuntimeArtifact:
             "changed": self.changed,
             "written": self.written,
             "checksum": self.checksum,
+            "wire": {
+                "format": EE02_WIRE_FORMAT,
+                "checksum": self.wire_checksum,
+                "path": str(self.wire_path),
+                "bytes": EE02_PAYLOAD_BYTES,
+                "buffer_dimensions": {
+                    "width": EE02_BUFFER_WIDTH,
+                    "height": EE02_BUFFER_HEIGHT,
+                },
+                "rotation": self.wire_rotation,
+                "seeed_sprite_rotation": self.seeed_sprite_rotation,
+            },
             "frame_path": str(self.frame_path),
             "rgb_path": str(self.rgb_path) if self.rgb_path else None,
             "manifest_path": str(self.manifest_path),
@@ -180,9 +205,8 @@ def _atomic_save_png(image: Image.Image, path: Path) -> None:
         raise
 
 
-def _atomic_write_json(value: Mapping[str, Any], path: Path) -> None:
+def _atomic_write_bytes(payload: bytes, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -198,6 +222,11 @@ def _atomic_write_json(value: Mapping[str, Any], path: Path) -> None:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
         raise
+
+
+def _atomic_write_json(value: Mapping[str, Any], path: Path) -> None:
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _atomic_write_bytes(payload, path)
 
 
 def _load_manifest(path: Path) -> dict[str, Any] | None:
@@ -218,6 +247,13 @@ def _native_file_is_valid(path: Path, expected_checksum: str, size: tuple[int, i
     except (OSError, ValueError):
         return False
     return image.size == size and validate_palette(image) and checksum_image(image) == expected_checksum
+
+
+def _binary_file_is_valid(path: Path, expected_bytes: int, expected_sha256: str) -> bool:
+    try:
+        return path.stat().st_size == expected_bytes and _file_sha256(path) == expected_sha256
+    except OSError:
+        return False
 
 
 @contextmanager
@@ -372,6 +408,8 @@ class FrameRuntime:
         provenance: str,
         when: datetime,
         frame_path: Path,
+        wire_path: Path,
+        encoded: EncodedEE02Frame,
         rgb_path: Path | None,
         mode_directory: Path,
     ) -> dict[str, Any]:
@@ -380,7 +418,12 @@ class FrameRuntime:
                 "path": str(frame_path.relative_to(mode_directory)),
                 "bytes": frame_path.stat().st_size,
                 "sha256": _file_sha256(frame_path),
-            }
+            },
+            "ee02_4bpp": {
+                "path": str(wire_path.relative_to(mode_directory)),
+                "bytes": wire_path.stat().st_size,
+                "sha256": encoded.sha256,
+            },
         }
         if rgb_path is not None:
             files["rgb_png"] = {
@@ -390,7 +433,7 @@ class FrameRuntime:
             }
         return {
             "schema_version": SCHEMA_VERSION,
-            "format": "spectra6-rgb-png-v1",
+            "format": "eink-frame-artifacts-v2",
             "mode": mode,
             "source": {"name": result.source_name, "provenance": provenance},
             "rendered_for": when.isoformat(),
@@ -399,6 +442,27 @@ class FrameRuntime:
             "dimensions": {"width": result.eink_image.width, "height": result.eink_image.height},
             "palette": {"name": "spectra6-monitor-rgb-v1", "colors": [list(color) for color in SPECTRA_PALETTE]},
             "pixel_checksum": {"algorithm": "sha256-dimensions-rgb-v1", "value": result.checksum},
+            "wire": {
+                "format": EE02_WIRE_FORMAT,
+                "bits_per_pixel": 4,
+                "buffer_dimensions": {
+                    "width": encoded.buffer_width,
+                    "height": encoded.buffer_height,
+                },
+                "logical_dimensions": {
+                    "width": encoded.logical_width,
+                    "height": encoded.logical_height,
+                },
+                "rotation": encoded.rotation,
+                "seeed_sprite_rotation": encoded.seeed_sprite_rotation,
+                "pixel_order": "row-major",
+                "nibble_order": "even-x-high-odd-x-low",
+                "color_codes": {
+                    name: f"0x{code:X}" for name, code in EE02_NAMED_COLOR_CODES.items()
+                },
+                "bytes": encoded.payload_bytes,
+                "sha256": encoded.sha256,
+            },
             "files": files,
             "timings": {
                 "source_seconds": round(result.source_seconds, 6),
@@ -440,19 +504,40 @@ class FrameRuntime:
                 )
 
             checksum = result.checksum
+            encoded = encode_ee02(result.eink_image, cfg.landscape_rotation)
             frame_path = frames_directory / f"{checksum}.png"
+            wire_path = frames_directory / f"{encoded.sha256}.ee02"
             rgb_path = frames_directory / f"{checksum}.rgb.png" if cfg.write_rgb else None
             current = _load_manifest(current_path)
-            current_checksum = ((current or {}).get("pixel_checksum") or {}).get("value")
+            current_wire_checksum = ((current or {}).get("wire") or {}).get("sha256")
             frame_valid = _native_file_is_valid(frame_path, checksum, result.eink_image.size)
+            wire_valid = _binary_file_is_valid(
+                wire_path, EE02_PAYLOAD_BYTES, encoded.sha256
+            )
             rgb_valid = rgb_path is None or rgb_path.is_file()
-            changed = current_checksum != checksum
+            changed = current_wire_checksum != encoded.sha256
 
-            if not force and not changed and frame_valid and rgb_valid:
+            if not force and not changed and frame_valid and wire_valid and rgb_valid:
                 return RuntimeArtifact(
-                    requested, mode, False, False, checksum, frame_path, rgb_path, current_path,
-                    result.eink_image.width, result.eink_image.height, result.source_name, provenance,
-                    when, result.source_seconds, result.conversion_seconds,
+                    requested_mode=requested,
+                    mode=mode,
+                    changed=False,
+                    written=False,
+                    checksum=checksum,
+                    wire_checksum=encoded.sha256,
+                    frame_path=frame_path,
+                    wire_path=wire_path,
+                    wire_rotation=encoded.rotation,
+                    seeed_sprite_rotation=encoded.seeed_sprite_rotation,
+                    rgb_path=rgb_path,
+                    manifest_path=current_path,
+                    width=result.eink_image.width,
+                    height=result.eink_image.height,
+                    source_name=result.source_name,
+                    provenance=provenance,
+                    rendered_for=when,
+                    source_seconds=result.source_seconds,
+                    conversion_seconds=result.conversion_seconds,
                 )
 
             frames_directory.mkdir(parents=True, exist_ok=True)
@@ -460,20 +545,40 @@ class FrameRuntime:
                 _atomic_save_png(result.eink_image, frame_path)
             if rgb_path is not None and (force or not rgb_valid):
                 _atomic_save_png(result.rgb_image, rgb_path)
+            if force or not wire_valid:
+                _atomic_write_bytes(encoded.payload, wire_path)
             manifest = self._manifest(
                 mode=mode,
                 result=result,
                 provenance=provenance,
                 when=when,
                 frame_path=frame_path,
+                wire_path=wire_path,
+                encoded=encoded,
                 rgb_path=rgb_path,
                 mode_directory=mode_directory,
             )
             _atomic_write_json(manifest, current_path)
             return RuntimeArtifact(
-                requested, mode, changed, True, checksum, frame_path, rgb_path, current_path,
-                result.eink_image.width, result.eink_image.height, result.source_name, provenance,
-                when, result.source_seconds, result.conversion_seconds,
+                requested_mode=requested,
+                mode=mode,
+                changed=changed,
+                written=True,
+                checksum=checksum,
+                wire_checksum=encoded.sha256,
+                frame_path=frame_path,
+                wire_path=wire_path,
+                wire_rotation=encoded.rotation,
+                seeed_sprite_rotation=encoded.seeed_sprite_rotation,
+                rgb_path=rgb_path,
+                manifest_path=current_path,
+                width=result.eink_image.width,
+                height=result.eink_image.height,
+                source_name=result.source_name,
+                provenance=provenance,
+                rendered_for=when,
+                source_seconds=result.source_seconds,
+                conversion_seconds=result.conversion_seconds,
             )
 
     def status(self, mode: str | None = None) -> dict[str, dict[str, Any]]:
@@ -503,5 +608,15 @@ class FrameRuntime:
             "timezone": self.config.timezone,
             "strict_sources": self.config.strict_sources,
             "headless": True,
+            "ee02": {
+                "format": EE02_WIRE_FORMAT,
+                "buffer_dimensions": {
+                    "width": EE02_BUFFER_WIDTH,
+                    "height": EE02_BUFFER_HEIGHT,
+                },
+                "bytes": EE02_PAYLOAD_BYTES,
+                "landscape_rotation": self.config.landscape_rotation.value,
+                "seeed_sprite_rotation": self.config.landscape_rotation.seeed_sprite_rotation,
+            },
             "modes": readiness,
         }

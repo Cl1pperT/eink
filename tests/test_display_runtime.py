@@ -12,6 +12,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from display_runtime.config import ConfigError, load_runtime_config
+from display_runtime.ee02 import EE02_PAYLOAD_BYTES, LandscapeRotation
 from display_runtime.runtime import FrameRuntime, SourcePolicyError, parse_render_time
 from display_simulator.models import Orientation
 from display_simulator.pipeline import checksum_image, validate_palette
@@ -74,6 +75,9 @@ class RuntimeConfigTests(unittest.TestCase):
             path.write_text('location = "Provo"\n', encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, "location.*must be a table"):
                 load_runtime_config(path)
+            path.write_text('[ee02]\nlandscape_rotation = "upside-down"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "clockwise or counter-clockwise"):
+                load_runtime_config(path)
 
     def test_render_time_uses_configured_timezone(self):
         naive = parse_render_time("2026-07-11T21:30:00", "America/Denver")
@@ -101,6 +105,8 @@ class FrameRuntimeTests(unittest.TestCase):
             self.assertFalse(second.written)
             self.assertEqual(first.frame_path, second.frame_path)
             self.assertTrue(first.frame_path.is_file())
+            self.assertTrue(first.wire_path.is_file())
+            self.assertEqual(first.wire_path.stat().st_size, EE02_PAYLOAD_BYTES)
             self.assertTrue(first.manifest_path.is_file())
             with Image.open(first.frame_path) as opened:
                 output = opened.convert("RGB")
@@ -109,6 +115,10 @@ class FrameRuntimeTests(unittest.TestCase):
             self.assertEqual(checksum_image(output), first.checksum)
             manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["pixel_checksum"]["value"], first.checksum)
+            self.assertEqual(manifest["wire"]["sha256"], first.wire_checksum)
+            self.assertEqual(manifest["wire"]["buffer_dimensions"], {"width": 1200, "height": 1600})
+            self.assertEqual(manifest["wire"]["nibble_order"], "even-x-high-odd-x-low")
+            self.assertEqual(manifest["files"]["ee02_4bpp"]["bytes"], 960_000)
             self.assertEqual(manifest["source"]["provenance"], "synthetic")
             self.assertFalse(list(config.output_directory.rglob("*.tmp")))
 
@@ -121,6 +131,8 @@ class FrameRuntimeTests(unittest.TestCase):
                 source_factories={"test-pattern": lambda: SolidSource((0, 0, 0))},
             ).render("test-pattern")
             self.assertEqual((artifact.width, artifact.height), (1200, 1600))
+            self.assertEqual(artifact.wire_rotation, "none")
+            self.assertEqual(artifact.seeed_sprite_rotation, 0)
             with Image.open(artifact.frame_path) as opened:
                 self.assertEqual(opened.size, (1200, 1600))
 
@@ -157,6 +169,42 @@ class FrameRuntimeTests(unittest.TestCase):
                         source_factories={"test-pattern": lambda: SolidSource((255, 0, 0))},
                     ).render("test-pattern")
             self.assertEqual(first.manifest_path.read_bytes(), before)
+
+    def test_corrupt_cached_wire_is_repaired_without_claiming_pixel_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            factories = {"test-pattern": lambda: SolidSource((255, 0, 0))}
+            first = FrameRuntime(config, source_factories=factories).render("test-pattern")
+            first.wire_path.write_bytes(b"corrupt")
+            repaired = FrameRuntime(config, source_factories=factories).render("test-pattern")
+            self.assertFalse(repaired.changed)
+            self.assertTrue(repaired.written)
+            self.assertEqual(repaired.wire_path.stat().st_size, EE02_PAYLOAD_BYTES)
+            self.assertEqual(repaired.wire_path, first.wire_path)
+
+    def test_landscape_rotation_change_advances_wire_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+
+            class AsymmetricSource:
+                name = "Test Pattern · asymmetric"
+
+                def render(self, _context):
+                    image = Image.new("RGB", (1600, 1200), (236, 234, 223))
+                    image.putpixel((0, 0), (26, 26, 28))
+                    return image
+
+            factories = {"test-pattern": AsymmetricSource}
+            clockwise = FrameRuntime(config, source_factories=factories).render("test-pattern")
+            counter_config = replace(
+                config, landscape_rotation=LandscapeRotation.COUNTER_CLOCKWISE
+            )
+            counter = FrameRuntime(counter_config, source_factories=factories).render("test-pattern")
+            self.assertTrue(counter.changed)
+            self.assertNotEqual(clockwise.wire_checksum, counter.wire_checksum)
+            self.assertEqual(counter.wire_rotation, "counter-clockwise")
 
     def test_strict_runtime_rejects_fallback_provenance(self):
         with tempfile.TemporaryDirectory() as directory:

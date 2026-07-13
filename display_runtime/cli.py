@@ -10,6 +10,7 @@ from typing import Sequence
 from display_simulator.models import FitMode, Orientation
 
 from .config import ConfigError, load_runtime_config
+from .ee02 import LandscapeRotation
 from .runtime import (
     CANONICAL_MODES,
     FrameRuntime,
@@ -55,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--output-dir", type=Path, help="override the configured output directory")
     render.add_argument("--orientation", choices=("landscape", "portrait"), help="override output orientation")
     render.add_argument("--fit", type=_fit_argument, metavar="{crop,fit,stretch}", help="override fit mode")
+    render.add_argument(
+        "--landscape-rotation",
+        choices=tuple(rotation.value for rotation in LandscapeRotation),
+        help="override rotation into the EE02 1200x1600 backing buffer",
+    )
     render.add_argument("--allow-demo", action="store_true", help="allow fixture/sample fallback for this manual render")
     render.add_argument("--no-rgb", action="store_true", help="do not retain the continuous-colour RGB sidecar")
     render.add_argument("--force", action="store_true", help="rewrite artifacts even when pixels are unchanged")
@@ -84,6 +90,8 @@ def _runtime_from_args(args) -> FrameRuntime:
         config = replace(config, orientation=Orientation(args.orientation))
     if getattr(args, "fit", None) is not None:
         config = replace(config, fit_mode=args.fit)
+    if getattr(args, "landscape_rotation", None):
+        config = replace(config, landscape_rotation=LandscapeRotation(args.landscape_rotation))
     if getattr(args, "no_rgb", False):
         config = replace(config, write_rgb=False)
     return FrameRuntime(config)
@@ -95,8 +103,12 @@ def _print_artifact(artifact: RuntimeArtifact) -> None:
     print(f"{artifact.mode}: {state}; {action} last-known-good frame")
     print(f"source: {artifact.source_name} ({artifact.provenance})")
     print(f"native: {artifact.width}x{artifact.height}")
-    print(f"checksum: {artifact.checksum}")
+    print(f"pixel checksum: {artifact.checksum}")
     print(f"frame: {artifact.frame_path}")
+    print(
+        f"EE02: {artifact.wire_path} · {artifact.wire_path.stat().st_size} bytes · "
+        f"{artifact.wire_rotation} · SHA-256 {artifact.wire_checksum}"
+    )
     if artifact.rgb_path:
         print(f"rgb: {artifact.rgb_path}")
     print(f"manifest: {artifact.manifest_path}")
@@ -130,7 +142,7 @@ def _run(args) -> int:
             print("No committed frames.")
         else:
             for mode, manifest in status.items():
-                checksum = (manifest.get("pixel_checksum") or {}).get("value", "unknown")
+                checksum = (manifest.get("wire") or {}).get("sha256", "unknown")
                 source = (manifest.get("source") or {}).get("name", "unknown")
                 dimensions = manifest.get("dimensions") or {}
                 print(
@@ -148,6 +160,11 @@ def _run(args) -> int:
             print(f"configuration: {config_label}")
             print(f"output: {result['output_directory']}")
             print(f"headless: yes · orientation: {result['orientation']} · timezone: {result['timezone']}")
+            ee02 = result["ee02"]
+            print(
+                f"EE02: {ee02['buffer_dimensions']['width']}x{ee02['buffer_dimensions']['height']} · "
+                f"{ee02['bytes']} bytes · {ee02['landscape_rotation']}"
+            )
             for mode, check in result["modes"].items():
                 marker = "ready" if check["ready"] else "not ready"
                 print(f"{mode}: {marker} — {check['reason']}")

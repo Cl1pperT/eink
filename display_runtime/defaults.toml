@@ -23,6 +23,9 @@ method = "floyd-steinberg"
 saturation = 0.6
 blue_bias = 0.5
 
+[ee02]
+landscape_rotation = "clockwise"
+
 [repositories]
 avian_weather = ""
 inkystarmap = ""

@@ -27,6 +27,11 @@ method = "floyd-steinberg"
 saturation = 0.6
 blue_bias = 0.5
 
+[ee02]
+# clockwise mirrors Seeed_GFX sprite rotation 1; use counter-clockwise for the
+# opposite physical mounting (sprite rotation 3).
+landscape_rotation = "clockwise"
+
 [repositories]
 avian_weather = "/opt/eink/AvianVisitors"
 inkystarmap = "/opt/eink/inkystarmap"

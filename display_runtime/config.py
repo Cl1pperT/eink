@@ -12,6 +12,8 @@ import tomllib
 from display_simulator.models import ConversionSettings, FitMode, Orientation
 from display_simulator.schedule import ScheduleConfig, parse_clock
 
+from .ee02 import EE02EncodingError, LandscapeRotation, parse_landscape_rotation
+
 
 class ConfigError(ValueError):
     """Raised when a runtime configuration cannot be loaded safely."""
@@ -30,6 +32,7 @@ class RuntimeConfig:
     timezone: str
     schedule: ScheduleConfig
     conversion: ConversionSettings
+    landscape_rotation: LandscapeRotation
     output_directory: Path
     write_rgb: bool
     avian_weather_repo: Path | None
@@ -164,6 +167,14 @@ def _fit_mode(value: Any) -> FitMode:
         raise ConfigError("display.fit_mode must be crop, fit, or stretch") from exc
 
 
+def _landscape_rotation(value: Any) -> LandscapeRotation:
+    text = _string(value, "ee02.landscape_rotation", allow_empty=False)
+    try:
+        return parse_landscape_rotation(text)
+    except EE02EncodingError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
 def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
     base = path.parent if path else Path.cwd()
     runtime = data["runtime"]
@@ -171,6 +182,7 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
     location = data["location"]
     schedule_data = data["schedule"]
     conversion = data["conversion"]
+    ee02 = data["ee02"]
     repositories = data["repositories"]
     sources = data["sources"]
     weather = data["weather"]
@@ -249,6 +261,7 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
         timezone=timezone,
         schedule=schedule,
         conversion=conversion_settings,
+        landscape_rotation=_landscape_rotation(ee02["landscape_rotation"]),
         output_directory=output_directory,
         write_rgb=_boolean(output["write_rgb"], "output.write_rgb"),
         avian_weather_repo=_path(repositories["avian_weather"], "repositories.avian_weather", base),

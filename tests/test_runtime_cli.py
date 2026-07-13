@@ -32,6 +32,8 @@ class RuntimeCliTests(unittest.TestCase):
             self.assertEqual(result["mode"], "test-pattern")
             self.assertEqual(result["dimensions"], {"width": 1600, "height": 1200})
             self.assertTrue(Path(result["frame_path"]).is_file())
+            self.assertEqual(result["wire"]["bytes"], 960_000)
+            self.assertTrue(Path(result["wire"]["path"]).is_file())
 
             stdout = io.StringIO()
             with redirect_stdout(stdout):
@@ -44,6 +46,7 @@ class RuntimeCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             status = json.loads(stdout.getvalue())
             self.assertEqual(status["test-pattern"]["pixel_checksum"]["value"], result["checksum"])
+            self.assertEqual(status["test-pattern"]["wire"]["sha256"], result["wire"]["checksum"])
 
     def test_missing_live_repository_returns_nonzero_without_traceback(self):
         with tempfile.TemporaryDirectory() as directory:
