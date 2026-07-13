@@ -170,6 +170,24 @@ class FrameRuntimeTests(unittest.TestCase):
                     ).render("test-pattern")
             self.assertEqual(first.manifest_path.read_bytes(), before)
 
+    def test_wire_write_failure_preserves_previous_current_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            first = FrameRuntime(
+                config,
+                source_factories={"test-pattern": lambda: SolidSource((0, 0, 0))},
+            ).render("test-pattern")
+            before = first.manifest_path.read_bytes()
+            with patch("display_runtime.runtime._atomic_write_bytes", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    FrameRuntime(
+                        config,
+                        source_factories={"test-pattern": lambda: SolidSource((255, 0, 0))},
+                    ).render("test-pattern")
+            self.assertEqual(first.manifest_path.read_bytes(), before)
+            self.assertEqual(first.wire_path.stat().st_size, EE02_PAYLOAD_BYTES)
+
     def test_corrupt_cached_wire_is_repaired_without_claiming_pixel_change(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

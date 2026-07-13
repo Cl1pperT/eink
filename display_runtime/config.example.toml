@@ -63,3 +63,17 @@ caption = ""
 [output]
 directory = "/var/lib/eink-display/frames"
 write_rgb = true
+
+[server]
+# Bind to the Pi's LAN interfaces. Set DISPLAY_RUNTIME_AUTH_TOKEN in the
+# systemd environment; do not put a production token in a command argument.
+host = "0.0.0.0"
+port = 8787
+auth_token = ""
+chunk_size = 65536
+
+[esp_client]
+server_url = "http://127.0.0.1:8787"
+state_directory = "/var/lib/eink-display/esp-simulator"
+timeout = 30.0
+chunk_size = 65536

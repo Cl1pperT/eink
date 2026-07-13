@@ -35,6 +35,14 @@ class RuntimeConfig:
     landscape_rotation: LandscapeRotation
     output_directory: Path
     write_rgb: bool
+    server_host: str
+    server_port: int
+    server_auth_token: str
+    server_chunk_size: int
+    esp_server_url: str
+    esp_state_directory: Path
+    esp_timeout: float
+    esp_chunk_size: int
     avian_weather_repo: Path | None
     inkystarmap_repo: Path | None
     bird_source: str
@@ -188,6 +196,8 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
     weather = data["weather"]
     photo = data["photo"]
     output = data["output"]
+    server = data["server"]
+    esp_client = data["esp_client"]
 
     try:
         orientation = Orientation(_string(display["orientation"], "display.orientation", allow_empty=False).lower())
@@ -249,6 +259,27 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
     if weather_units not in ("imperial", "metric"):
         raise ConfigError("weather.units must be imperial or metric")
 
+    server_port = _integer(server["port"], "server.port")
+    if not 1 <= server_port <= 65535:
+        raise ConfigError("server.port must be between 1 and 65535")
+    server_chunk_size = _integer(server["chunk_size"], "server.chunk_size")
+    if server_chunk_size <= 0:
+        raise ConfigError("server.chunk_size must be greater than zero")
+    esp_chunk_size = _integer(esp_client["chunk_size"], "esp_client.chunk_size")
+    if esp_chunk_size <= 0:
+        raise ConfigError("esp_client.chunk_size must be greater than zero")
+    esp_timeout = _number(esp_client["timeout"], "esp_client.timeout")
+    if esp_timeout <= 0:
+        raise ConfigError("esp_client.timeout must be greater than zero")
+    esp_state_directory = _path(esp_client["state_directory"], "esp_client.state_directory", base)
+    if esp_state_directory is None:
+        raise ConfigError("esp_client.state_directory must not be empty")
+    auth_token = os.environ.get("DISPLAY_RUNTIME_AUTH_TOKEN")
+    if auth_token is None:
+        auth_token = _string(server["auth_token"], "server.auth_token")
+    elif not auth_token:
+        raise ConfigError("DISPLAY_RUNTIME_AUTH_TOKEN must not be empty when it is set")
+
     return RuntimeConfig(
         config_path=path,
         strict_sources=_boolean(runtime["strict_sources"], "runtime.strict_sources"),
@@ -264,6 +295,14 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
         landscape_rotation=_landscape_rotation(ee02["landscape_rotation"]),
         output_directory=output_directory,
         write_rgb=_boolean(output["write_rgb"], "output.write_rgb"),
+        server_host=_string(server["host"], "server.host", allow_empty=False),
+        server_port=server_port,
+        server_auth_token=auth_token,
+        server_chunk_size=server_chunk_size,
+        esp_server_url=_string(esp_client["server_url"], "esp_client.server_url", allow_empty=False),
+        esp_state_directory=esp_state_directory,
+        esp_timeout=esp_timeout,
+        esp_chunk_size=esp_chunk_size,
         avian_weather_repo=_path(repositories["avian_weather"], "repositories.avian_weather", base),
         inkystarmap_repo=_path(repositories["inkystarmap"], "repositories.inkystarmap", base),
         bird_source=_bird_source(sources["bird"], base),

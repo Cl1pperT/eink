@@ -106,7 +106,9 @@ def rotate_to_ee02_buffer(
     rotated exactly as Seeed_GFX maps logical drawing coordinates for sprite
     rotation 1 (clockwise) or 3 (counter-clockwise).
     """
-    rgb = image.convert("RGB")
+    if image.mode != "RGB":
+        raise EE02EncodingError(f"EE02 input must be RGB; got {image.mode}")
+    rgb = image
     if rgb.size == (EE02_BUFFER_WIDTH, EE02_BUFFER_HEIGHT):
         return rgb, "none", 0
     if rgb.size != (EE02_BUFFER_HEIGHT, EE02_BUFFER_WIDTH):
@@ -132,7 +134,9 @@ def pack_spectra6_4bpp(image: Image.Image) -> bytes:
     Pixels are row-major. Even x occupies bits 7..4 and odd x occupies bits
     3..0, exactly as Seeed_GFX's 4bpp TFT_eSprite implementation.
     """
-    rgb = image.convert("RGB")
+    if image.mode != "RGB":
+        raise EE02EncodingError(f"EE02 input must be RGB; got {image.mode}")
+    rgb = image
     width, height = rgb.size
     if width < 1 or height < 1 or width % 2:
         raise EE02DimensionsError("4bpp images must have positive dimensions and an even width")

@@ -11,6 +11,8 @@ from display_simulator.models import FitMode, Orientation
 
 from .config import ConfigError, load_runtime_config
 from .ee02 import LandscapeRotation
+from .esp_client import ESPClientError, SimulatedESPClient
+from .frame_server import FrameServer
 from .runtime import (
     CANONICAL_MODES,
     FrameRuntime,
@@ -38,6 +40,16 @@ def _fit_argument(value: str) -> FitMode:
         return aliases[value.strip().lower()]
     except KeyError as exc:
         raise argparse.ArgumentTypeError("fit must be crop, fit, or stretch") from exc
+
+
+def _port_argument(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 0 and 65535")
+    return port
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +90,29 @@ def build_parser() -> argparse.ArgumentParser:
     selected = commands.add_parser("mode", help="resolve the scheduled mode for a date and time")
     selected.add_argument("--at", "--when", dest="at", help="ISO-8601 time; defaults to now")
     selected.add_argument("--json", action="store_true", help="emit a machine-readable result")
+
+    serve = commands.add_parser("serve", help="serve committed EE02 frames to an ESP32")
+    serve.add_argument("--host", help="override the configured listen address")
+    serve.add_argument("--port", type=_port_argument, help="override the configured port")
+    serve.add_argument("--output-dir", type=Path, help="override the configured frame directory")
+    serve.add_argument(
+        "--token-file",
+        type=Path,
+        help="read the bearer token from a file instead of config or DISPLAY_RUNTIME_AUTH_TOKEN",
+    )
+    serve.add_argument("--quiet", action="store_true", help="disable HTTP access logging")
+
+    esp_sync = commands.add_parser("esp-sync", help="pull and verify a frame with the simulated ESP client")
+    esp_sync.add_argument("mode", type=_mode_argument, choices=CANONICAL_MODES)
+    esp_sync.add_argument("--server-url", help="override the configured frame server URL")
+    esp_sync.add_argument("--state-dir", type=Path, help="override the simulated ESP state directory")
+    esp_sync.add_argument("--timeout", type=float, help="override the HTTP timeout in seconds")
+    esp_sync.add_argument(
+        "--token-file",
+        type=Path,
+        help="read the bearer token from a file instead of config or DISPLAY_RUNTIME_AUTH_TOKEN",
+    )
+    esp_sync.add_argument("--json", action="store_true", help="emit a machine-readable result")
     return parser
 
 
@@ -116,6 +151,25 @@ def _print_artifact(artifact: RuntimeArtifact) -> None:
         f"timing: source {artifact.source_seconds:.3f}s; "
         f"conversion {artifact.conversion_seconds:.3f}s"
     )
+
+
+def _authentication_token(args, runtime: FrameRuntime) -> str:
+    token_file = getattr(args, "token_file", None)
+    if token_file is not None:
+        try:
+            token = token_file.expanduser().read_text(encoding="utf-8").rstrip("\r\n")
+        except OSError as exc:
+            raise ConfigError(f"could not read authentication token file: {exc}") from exc
+    else:
+        token = runtime.config.server_auth_token
+    if not token:
+        raise ConfigError(
+            "an authentication token is required; set DISPLAY_RUNTIME_AUTH_TOKEN, "
+            "server.auth_token, or --token-file"
+        )
+    if "\r" in token or "\n" in token:
+        raise ConfigError("the authentication token must be a single line")
+    return token
 
 
 def _run(args) -> int:
@@ -179,6 +233,53 @@ def _run(args) -> int:
             print(f"{when.isoformat()}: {mode}")
         return 0
 
+    if args.command == "serve":
+        token = _authentication_token(args, runtime)
+        host = args.host if args.host is not None else runtime.config.server_host
+        port = args.port if args.port is not None else runtime.config.server_port
+        server = FrameServer(
+            (host, port),
+            output_directory=runtime.config.output_directory,
+            auth_token=token,
+            chunk_size=runtime.config.server_chunk_size,
+            log_requests=not args.quiet,
+        )
+        bound_host, bound_port = server.server_address[:2]
+        print(f"frame server listening on http://{bound_host}:{bound_port}")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return 0
+
+    if args.command == "esp-sync":
+        if args.mode == "automatic":
+            raise ValueError("esp-sync needs a concrete mode, not automatic")
+        token = _authentication_token(args, runtime)
+        server_url = args.server_url or runtime.config.esp_server_url
+        state_directory = (
+            args.state_dir.expanduser().resolve(strict=False)
+            if args.state_dir is not None
+            else runtime.config.esp_state_directory
+        )
+        timeout = args.timeout if args.timeout is not None else runtime.config.esp_timeout
+        result = SimulatedESPClient(
+            server_url,
+            token,
+            state_directory,
+            timeout=timeout,
+            chunk_size=runtime.config.esp_chunk_size,
+        ).pull(args.mode)
+        if args.json:
+            print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+        else:
+            action = "refresh" if result.changed else "skip refresh"
+            print(f"{result.mode}: {action} · {result.status}")
+            print(f"EE02: {result.frame_path} · {result.bytes} bytes · SHA-256 {result.sha256}")
+        return 0
+
     raise RuntimeError(f"unsupported command {args.command!r}")
 
 
@@ -190,6 +291,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
+    except ESPClientError as exc:
+        print(f"ESP sync failed: {exc}", file=sys.stderr)
+        return 5
     except (SourcePolicyError, FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"render failed: {exc}", file=sys.stderr)
         return 3

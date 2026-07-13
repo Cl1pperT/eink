@@ -13,6 +13,7 @@ from display_runtime.ee02 import (
     EE02_PAYLOAD_BYTES,
     EE02ColorError,
     EE02DimensionsError,
+    EE02EncodingError,
     LandscapeRotation,
     decode_ee02,
     encode_ee02,
@@ -128,6 +129,8 @@ class EE02EncoderTests(unittest.TestCase):
             pack_spectra6_4bpp(invalid)
         with self.assertRaisesRegex(EE02DimensionsError, "even width"):
             pack_spectra6_4bpp(Image.new("RGB", (3, 1), WHITE))
+        with self.assertRaisesRegex(EE02EncodingError, "must be RGB"):
+            pack_spectra6_4bpp(Image.new("P", (2, 1)))
         with self.assertRaisesRegex(EE02DimensionsError, "1600x1200"):
             encode_ee02(Image.new("RGB", (800, 600), WHITE))
         with self.assertRaisesRegex(EE02DimensionsError, "must contain"):
