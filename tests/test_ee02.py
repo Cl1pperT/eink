@@ -17,6 +17,7 @@ from display_runtime.ee02 import (
     LandscapeRotation,
     decode_ee02,
     encode_ee02,
+    has_only_ee02_color_nibbles,
     pack_spectra6_4bpp,
     rotate_to_ee02_buffer,
     unpack_spectra6_4bpp,
@@ -42,6 +43,17 @@ class EE02EncoderTests(unittest.TestCase):
         image = Image.new("RGB", (6, 1))
         image.putdata(SPECTRA_PALETTE)
         self.assertEqual(pack_spectra6_4bpp(image), bytes.fromhex("f0 b6 d2"))
+
+    def test_packed_palette_validator_matches_all_six_color_pairs(self):
+        allowed = tuple(EE02_NAMED_COLOR_CODES.values())
+        valid = bytes((high << 4) | low for high in allowed for low in allowed)
+        self.assertTrue(has_only_ee02_color_nibbles(valid))
+        self.assertTrue(has_only_ee02_color_nibbles(b""))
+        for invalid in (0x01, 0x10, 0x77, 0xEE):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(
+                    has_only_ee02_color_nibbles(b"\x00" + bytes((invalid,)))
+                )
 
     def test_clockwise_landscape_coordinates_match_seeed_rotation_one(self):
         image = Image.new("RGB", (1600, 1200), WHITE)

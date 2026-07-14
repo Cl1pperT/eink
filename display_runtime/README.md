@@ -11,40 +11,100 @@ manifests and verified EE02 payloads; it never renders in an HTTP request.
 
 ## Raspberry Pi installation
 
-Use 64-bit Raspberry Pi OS and Python 3.11 or newer:
+The supported production target is a Raspberry Pi 5 running 64-bit Raspberry
+Pi OS Bookworm (or newer) with systemd and Python 3.11 or newer. From a checkout
+that is not `/opt/eink-display`, run:
 
 ```bash
-git clone <this-repository> /opt/eink/frame-runtime
-cd /opt/eink/frame-runtime
-python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -e '.[integrations]'
-sudo .venv/bin/playwright install-deps chromium
-.venv/bin/playwright install chromium
+sudo ./deploy/install-raspberry-pi.sh
 ```
 
-The optional integration dependencies are needed for live bird-page and star
-map rendering. Test-pattern, uploaded-photo, and core conversion only require
-Pillow.
+The installer creates a locked-down `eink-display` system account, builds a
+fresh virtual environment, installs live integrations and shared headless
+Chromium, verifies the package, renders an isolated 960,000-byte test frame,
+and installs the authenticated server and daily render timers. Managed paths
+are:
 
-Copy and edit the example configuration:
+```text
+/opt/eink-display/                  application, venv, browser
+/etc/eink-display/runtime.toml      operator configuration
+/etc/eink-display/frame-server.token
+/var/lib/eink-display/              atomic frames, cache, uploads
+```
+
+Configuration, token, frame state, and external repositories are preserved on
+a normal reinstall. Use `--rotate-token` or `--force-config` only deliberately;
+the latter first creates a timestamped backup. Useful constrained installs are
+`--core-only`, `--skip-browser`, `--no-start`, and `--no-enable`. Run
+`./deploy/install-raspberry-pi.sh --help` for layout and staging options.
+Upgrades activate a fresh venv only after smoke tests, then roll back both the
+previous venv and unit files if final verification or service startup fails.
+
+Edit the installed configuration and point it at separately managed source
+checkouts:
 
 ```bash
-mkdir -p ~/.config/eink-display
-cp display_runtime/config.example.toml ~/.config/eink-display/runtime.toml
+sudoedit /etc/eink-display/runtime.toml
+sudo systemctl restart eink-display-server.service
+sudo systemctl start eink-display-render@test-pattern.service
 ```
 
-Use absolute repository paths on the Pi. `repositories.avian_weather` is shared
-by weather and birds. It must point directly at the checkout containing both
-`weather_frame/renderer.py` and `frame/shoot.py`. `repositories.inkystarmap`
-must point directly at the checkout containing
-`src/inkystarmap/inkystarmap.py`.
+Use absolute repository paths that the service account can read.
+`repositories.avian_weather` is shared by weather and birds. It must point
+directly at the checkout containing both `weather_frame/renderer.py` and
+`frame/shoot.py`. `repositories.inkystarmap` must point directly at the
+checkout containing `src/inkystarmap/inkystarmap.py`. If either external repo
+adds Python requirements beyond this package's `integrations` extra, install
+them into `/opt/eink-display/.venv` and rerun `eink-display check` as the
+service account.
 
 `sources.bird` must be the actual AvianVisitors collage page—the page containing
 the `.gtile` bird tiles—not merely the stock BirdNET-Pi dashboard. If the
 BirdNET host only serves its standard dashboard, host/install the AvianVisitors
 frontend there or provide a pre-rendered bird PNG until that integration is
 available.
+
+Check services, logs, and timers with:
+
+```bash
+systemctl status eink-display-server.service
+systemctl list-timers 'eink-display-*'
+journalctl -u eink-display-server.service
+journalctl -u 'eink-display-render@star-map.service'
+```
+
+The installed timers render weather at 05:55, birds at 09:55, and the star map
+at 19:55 in the Pi's local timezone, which should match `location.timezone`.
+Each render starts five minutes before the ESP32's 06:00, 10:00, and 20:00
+display boundary so a newly committed frame is normally ready before the mode
+changes, avoiding an unnecessary refresh of yesterday's frame.
+They are persistent across outages and
+share a lock so missed jobs cannot exhaust Pi memory by starting together.
+Failed source renders retry at a bounded interval while the previous committed
+frame remains available to the server.
+These `OnCalendar` values are independent of the TOML automatic-mode schedule;
+use `systemctl edit eink-display-weather.timer` (and the corresponding bird or
+star timer) if you change production render times.
+
+Provision the ESP32 with the complete token stored at
+`/etc/eink-display/frame-server.token`; the installer never prints it. Treat it
+like a password. `sudo /opt/eink-display/install-raspberry-pi.sh --uninstall`
+removes the application and units while preserving configuration and frames;
+add `--purge` only when those retained files should also be deleted.
+
+For development or an unsupported host, the manual equivalent is still:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -e '.[integrations]'
+PLAYWRIGHT_BROWSERS_PATH="$PWD/playwright" .venv/bin/playwright install chromium
+cp display_runtime/config.example.toml runtime.toml
+```
+
+The optional integration dependencies are needed for live bird-page and star
+map rendering. Test-pattern, uploaded-photo, and core conversion only require
+Pillow.
 
 ## CLI
 
@@ -109,8 +169,8 @@ python3 -m display_runtime serve \
 ```
 
 The file must contain a non-empty, single-line token. Restrict it to the service
-account (for example, mode `0600`). The server refuses to start without a token
-and never accepts credentials in a URL or query string.
+account (the installer uses root/service-group mode `0640`). The server refuses
+to start without a token and never accepts credentials in a URL or query string.
 
 The version 1 pull API supports `GET` and `HEAD`:
 
@@ -131,9 +191,15 @@ Manifest ETags identify the exact JSON representation. Frame ETags identify
 the EE02 SHA-256. Responses also carry the frame checksum and wire-format
 headers. A client can send `If-None-Match` and receives `304 Not Modified` when
 its entity is current. `Cache-Control: no-cache` means caches may retain a
-response but must revalidate it. Clients should fetch the manifest first and
-then request `/v1/frame/<mode>/<sha256>`; the content-addressed URL prevents a
-new render committed between those requests from mixing metadata and bytes.
+response but must revalidate it. General clients can fetch the manifest first
+and then request `/v1/frame/<mode>/<sha256>`. The constrained ESP32 firmware
+uses `/v1/frame/<mode>` directly; that endpoint validates one current manifest
+and opens its exact immutable payload before sending headers, so a concurrent
+render cannot mix metadata and bytes.
+
+Before any frame is served, the Pi verifies its exact length, SHA-256, and all
+1,920,000 packed color nibbles. A checksum-valid artifact containing a color
+outside Setup510's six codes is treated as unavailable and receives `503`.
 
 The built-in server is plain HTTP. A bearer token prevents unauthenticated
 access but does not encrypt the token or frame in transit. Use it only on a
@@ -143,9 +209,11 @@ port 8787 to the public internet. For an untrusted network, bind to
 
 ## Simulated ESP client
 
-`esp-sync` exercises the same pull, validation, caching, and refresh decision
-that the firmware should implement. Start with a committed frame and a running
-server, then use a second terminal:
+`esp-sync` exercises the same validation, caching, last-known-good, and refresh
+decisions as the firmware. It deliberately uses the more inspectable
+manifest-first form of the protocol, while the memory-constrained firmware
+uses the equivalent current-frame endpoint. Start with a committed frame and
+a running server, then use a second terminal:
 
 ```bash
 export DISPLAY_RUNTIME_AUTH_TOKEN='<the-same-token>'
@@ -155,14 +223,15 @@ python3 -m display_runtime esp-sync weather --json
 
 Use `--server-url http://<pi-address>:8787` when the simulator is not running
 on the Pi. `--state-dir`, `--timeout`, and `--token-file` override the matching
-configuration or credential source. `esp-sync` requires a concrete mode;
-scheduled `automatic` selection remains a Pi runtime responsibility.
+configuration or credential source. `esp-sync` requires a concrete mode and
+does not run a clock. The production firmware performs its own NTP-backed
+`automatic` selection using the same configured boundaries.
 
 The simulated client stores verified, checksum-named payloads under
 `esp_client.state_directory`, plus atomic `state.json` and `display.ee02`
 files. It revalidates the manifest ETag, verifies the declared format, exact
-960,000-byte length, response headers, and SHA-256 while downloading to a
-temporary file, and only then atomically activates the frame. Switching back
+960,000-byte length, response headers, SHA-256, and every packed color nibble
+while downloading to a temporary file, and only then atomically activates the frame. Switching back
 to a previously verified mode activates its cache without downloading it
 again. A timeout, authentication error, malformed response, truncation, or
 checksum mismatch leaves `display.ee02` and persistent client state unchanged.
@@ -248,6 +317,12 @@ downloaded and SHA-256-verified payload into `epaper.getPointer()` and then call
 `epaper.update()`. It must not rotate the already prepared payload again. The
 Seeed driver performs its own later conversion from sprite nibbles to panel
 controller transfer codes.
+
+The compiling PlatformIO/Arduino implementation is in
+[`firmware/esp32-ee02`](../firmware/esp32-ee02/). It targets the XIAO ESP32S3,
+EE02 board, and Setup510 panel, and implements bearer authentication, ETag
+revalidation, PSRAM staging, exact response validation, and persistent display
+checksums.
 
 ## Exit codes
 

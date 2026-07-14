@@ -33,6 +33,11 @@ EE02_COLOR_CODES: Final[dict[tuple[int, int, int], int]] = dict(
 EE02_CODE_COLORS: Final[dict[int, tuple[int, int, int]]] = {
     code: color for color, code in EE02_COLOR_CODES.items()
 }
+EE02_PACKED_COLOR_BYTES: Final[frozenset[int]] = frozenset(
+    (high << 4) | low
+    for high in EE02_NAMED_COLOR_CODES.values()
+    for low in EE02_NAMED_COLOR_CODES.values()
+)
 
 
 class EE02EncodingError(ValueError):
@@ -57,6 +62,14 @@ class LandscapeRotation(str, Enum):
     def seeed_sprite_rotation(self) -> int:
         # These exactly mirror TFT_eSprite::drawPixel() for a 4bpp sprite.
         return 1 if self is LandscapeRotation.CLOCKWISE else 3
+
+
+def has_only_ee02_color_nibbles(
+    payload: bytes | bytearray | memoryview,
+) -> bool:
+    """Return whether every packed nibble is one of Setup510's six colors."""
+
+    return all(value in EE02_PACKED_COLOR_BYTES for value in payload)
 
 
 def parse_landscape_rotation(value: str | LandscapeRotation) -> LandscapeRotation:

@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from display_runtime.ee02 import EE02_PAYLOAD_BYTES, EE02_WIRE_FORMAT
-from display_runtime.frame_server import FrameServer
+from display_runtime.frame_server import FRAME_CONTENT_TYPE, FrameServer, frame_etag
 
 
 TOKEN = "test-token-with-enough-entropy"
@@ -195,6 +195,9 @@ class FrameServerTests(unittest.TestCase):
                             self.assertEqual(response.status, 200)
                             self.assertEqual(response.read(), payload)
                             self.assertEqual(int(response.headers["Content-Length"]), len(payload))
+                            self.assertEqual(response.headers.get_content_type(), FRAME_CONTENT_TYPE)
+                            self.assertEqual(etag, frame_etag(checksum))
+                            self.assertEqual(response.headers.get("X-Frame-SHA256"), checksum)
                             self.assertEqual(response.headers.get("X-Content-SHA256"), checksum)
                             self.assertEqual(response.headers.get("X-Frame-Format"), EE02_WIRE_FORMAT)
                             self.assertIn("no-cache", response.headers["Cache-Control"])
@@ -208,6 +211,55 @@ class FrameServerTests(unittest.TestCase):
                             request(server, path, headers={"If-None-Match": f'"other", {etag}'})
                         self.assertEqual(caught.exception.code, 304)
                         self.assertEqual(caught.exception.headers["ETag"], etag)
+                        self.assertEqual(caught.exception.headers["X-Frame-SHA256"], checksum)
+                        self.assertEqual(caught.exception.headers["X-Content-SHA256"], checksum)
+                        self.assertEqual(caught.exception.headers["X-Frame-Format"], EE02_WIRE_FORMAT)
+
+    def test_http_10_firmware_request_receives_complete_200_and_304_contract(self):
+        import http.client
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            payload, checksum, _path = write_committed_frame(output, byte=0xD2)
+            with running_server(output) as server:
+                host, port = server.server_address
+
+                def firmware_request(etag: str = ""):
+                    connection = http.client.HTTPConnection(host, port, timeout=5)
+                    connection._http_vsn = 10
+                    connection._http_vsn_str = "HTTP/1.0"
+                    headers = {
+                        "Authorization": f"Bearer {TOKEN}",
+                        "Accept": FRAME_CONTENT_TYPE,
+                        "Accept-Encoding": "identity",
+                    }
+                    if etag:
+                        headers["If-None-Match"] = etag
+                    connection.request("GET", "/v1/frame/test-pattern", headers=headers)
+                    response = connection.getresponse()
+                    body = response.read()
+                    response_headers = dict(response.getheaders())
+                    connection.close()
+                    return response.status, response_headers, body
+
+                status, headers, body = firmware_request()
+                etag = frame_etag(checksum)
+                self.assertEqual(status, 200)
+                self.assertEqual(body, payload)
+                self.assertEqual(headers["ETag"], etag)
+                self.assertEqual(headers["Content-Type"], FRAME_CONTENT_TYPE)
+                self.assertEqual(int(headers["Content-Length"]), EE02_PAYLOAD_BYTES)
+                self.assertEqual(headers["X-Frame-SHA256"], checksum)
+                self.assertEqual(headers["X-Content-SHA256"], checksum)
+                self.assertEqual(headers["X-Frame-Format"], EE02_WIRE_FORMAT)
+
+                status, headers, body = firmware_request(etag)
+                self.assertEqual(status, 304)
+                self.assertEqual(body, b"")
+                self.assertEqual(headers["ETag"], etag)
+                self.assertEqual(headers["X-Frame-SHA256"], checksum)
+                self.assertEqual(headers["X-Content-SHA256"], checksum)
+                self.assertEqual(headers["X-Frame-Format"], EE02_WIRE_FORMAT)
 
     def test_missing_and_invalid_artifacts_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -230,6 +282,20 @@ class FrameServerTests(unittest.TestCase):
                         with self.assertRaises(HTTPError) as caught:
                             request(server, path)
                         self.assertEqual(caught.exception.code, 503)
+
+    def test_payload_with_unsupported_color_nibbles_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            _payload, checksum, _path = write_committed_frame(output, byte=0x11)
+            with running_server(output) as server:
+                for path in (
+                    "/v1/manifest/test-pattern",
+                    "/v1/frame/test-pattern",
+                    f"/v1/frame/test-pattern/{checksum}",
+                ):
+                    with self.subTest(path=path), self.assertRaises(HTTPError) as caught:
+                        request(server, path)
+                    self.assertEqual(caught.exception.code, 503)
 
     def test_malformed_manifest_and_invalid_paths_are_not_served(self):
         with tempfile.TemporaryDirectory() as directory:

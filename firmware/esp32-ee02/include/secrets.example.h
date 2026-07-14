@@ -5,6 +5,5 @@
 // at /etc/eink-display/frame-server.token.
 #define EINK_WIFI_SSID "replace-with-wifi-name"
 #define EINK_WIFI_PASSWORD "replace-with-wifi-password"
-#define EINK_FRAME_SERVER_URL "http://raspberrypi.local:8787"
+#define EINK_FRAME_SERVER_URL "http://replace-with-pi-address:8787"
 #define EINK_FRAME_AUTH_TOKEN "replace-with-pi-frame-server-token"
-

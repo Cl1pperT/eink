@@ -7,6 +7,8 @@ ConditionPathIsDirectory=@EINK_INSTALL_DIR@
 ConditionPathIsDirectory=@EINK_STATE_DIR@
 ConditionPathExists=@EINK_CONFIG_PATH@
 ConditionPathExists=@EINK_TOKEN_FILE@
+StartLimitIntervalSec=5min
+StartLimitBurst=12
 
 [Service]
 Type=simple

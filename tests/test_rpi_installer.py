@@ -61,6 +61,12 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        source = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("repair_venv_paths", source)
+        self.assertIn('"$ACTIVE_VENV/bin/eink-display" --version', source)
+        self.assertIn("backup_units_and_systemd_state", source)
+        self.assertIn("rollback_post_swap", source)
+        self.assertIn("trap finish_install EXIT", source)
 
     def test_staged_core_install_has_substituted_units_and_no_secret_leaks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -130,11 +136,13 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.assertIn("--token-file /srv/eink-config/frame-server.token", combined_units)
             self.assertIn("ReadWritePaths=/srv/eink-state", combined_units)
             self.assertIn("ReadOnlyPaths=/srv/eink-state", combined_units)
+            self.assertIn("Restart=on-failure", units["eink-display-render@.service"])
+            self.assertIn("RestartSec=15min", units["eink-display-render@.service"])
 
             expected_timers = {
-                "weather": "06:00:00",
-                "birds": "10:00:00",
-                "star-map": "20:00:00",
+                "weather": "05:55:00",
+                "birds": "09:55:00",
+                "star-map": "19:55:00",
             }
             for mode, time_of_day in expected_timers.items():
                 timer = units[f"eink-display-{mode}.timer"]
@@ -209,6 +217,7 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             backups = list(config.parent.glob("runtime.toml.backup.*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_bytes(), custom_config)
+            self.assertEqual(self.mode(backups[0]), 0o640)
             self.assertIn("backed up the previous runtime configuration", result.stdout)
             self.assertIn("rotated the bearer token", result.stdout)
             self.assertNotIn(replacement_token.strip(), result.stdout)
@@ -261,6 +270,41 @@ class RaspberryPiInstallerTests(unittest.TestCase):
         )
         self.assertNotEqual(root.returncode, 0)
         self.assertIn("--destdir must be an absolute directory other than /", root.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory) / "root"
+            overlap = self.run_installer(
+                stage,
+                "--config-dir",
+                "/srv/eink-data",
+                "--state-dir",
+                "/srv/eink-data/state",
+                check=False,
+            )
+            self.assertNotEqual(overlap.returncode, 0)
+            self.assertIn("--config-dir and --state-dir must not overlap", overlap.stderr)
+            self.assertFalse(stage.exists())
+
+    def test_symlinked_writable_state_subdirectory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "root"
+            state = stage / "var/lib/eink-display"
+            outside = root / "outside"
+            state.mkdir(parents=True)
+            outside.mkdir()
+            (state / "cache").symlink_to(outside, target_is_directory=True)
+
+            result = self.run_installer(
+                stage,
+                "--core-only",
+                "--no-enable",
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("managed state path cache may not be a symbolic link", result.stderr)
+            self.assertEqual(list(outside.iterdir()), [])
 
     def test_dry_run_describes_operation_without_creating_destdir(self):
         with tempfile.TemporaryDirectory() as directory:

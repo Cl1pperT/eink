@@ -8,6 +8,7 @@
 #include <mbedtls/version.h>
 
 #include <cstring>
+#include <ctime>
 
 #include "device_config.h"
 #include "frame_contract.h"
@@ -16,7 +17,10 @@
 #include "secrets.h"
 #else
 #include "secrets.example.h"
-#warning "Using placeholder credentials; copy secrets.example.h to secrets.h"
+#endif
+
+#ifndef BOARD_HAS_PSRAM
+#error "The EE02 target must provide external PSRAM"
 #endif
 
 static_assert(EPD_WIDTH == eink::kBackingWidth,
@@ -25,6 +29,21 @@ static_assert(EPD_HEIGHT == eink::kBackingHeight,
               "Seeed_GFX is not configured for Setup510 height");
 static_assert(EPD_COLOR_DEPTH == 4,
               "Seeed_GFX is not configured for the EE02 4bpp sprite");
+static_assert(TFT_WHITE == 0x0 && TFT_GREEN == 0x2 && TFT_RED == 0x6 &&
+                  TFT_YELLOW == 0xB && TFT_BLUE == 0xD && TFT_BLACK == 0xF,
+              "Seeed_GFX Setup510 color codes do not match the wire contract");
+static_assert(EINK_POLL_INTERVAL_MS > 0,
+              "EINK_POLL_INTERVAL_MS must be positive");
+static_assert(EINK_FORCE_RETRY_INTERVAL_MS > 0,
+              "EINK_FORCE_RETRY_INTERVAL_MS must be positive");
+static_assert(EINK_HTTP_READ_TIMEOUT_MS > 0 &&
+                  EINK_HTTP_READ_TIMEOUT_MS <= 65535UL,
+              "HTTPClient read timeout must fit its 16-bit millisecond API");
+static_assert(EINK_WEATHER_START_MINUTES >= 0 &&
+                  EINK_WEATHER_START_MINUTES < EINK_BIRDS_START_MINUTES &&
+                  EINK_BIRDS_START_MINUTES < EINK_STAR_MAP_START_MINUTES &&
+                  EINK_STAR_MAP_START_MINUTES < 24 * 60,
+              "automatic schedule boundaries must be ordered within one day");
 
 namespace {
 
@@ -32,6 +51,7 @@ constexpr char kPreferencesNamespace[] = "eink-frame";
 constexpr char kPreferenceMode[] = "mode";
 constexpr char kPreferenceSha[] = "sha256";
 constexpr char kPreferenceEtag[] = "etag";
+constexpr char kPreferenceValid[] = "state-valid";
 
 EPaper epaper;
 Preferences preferences;
@@ -44,6 +64,9 @@ String displayedEtag;
 uint32_t lastPollStarted = 0;
 bool pollImmediately = true;
 bool forceNextDownload = false;
+bool runtimeEnabled = false;
+bool timeServiceConfigured = false;
+bool panelInitialized = false;
 
 enum class SyncResult {
   kUpdated,
@@ -60,21 +83,99 @@ bool isPlaceholder(const char *value) {
          String(value).startsWith("replace-with-");
 }
 
+bool containsHttpUnsafeCharacters(const char *value) {
+  const String text(value == nullptr ? "" : value);
+  return text.indexOf('\r') >= 0 || text.indexOf('\n') >= 0;
+}
+
 bool configurationIsUsable() {
-  if (isPlaceholder(EINK_WIFI_SSID) || isPlaceholder(EINK_FRAME_AUTH_TOKEN)) {
+  const String wifiPassword(EINK_WIFI_PASSWORD);
+  if (isPlaceholder(EINK_WIFI_SSID) ||
+      wifiPassword.startsWith("replace-with-") ||
+      isPlaceholder(EINK_FRAME_AUTH_TOKEN)) {
     Serial.println("Configuration error: provision include/secrets.h");
     return false;
   }
-  const String server(EINK_FRAME_SERVER_URL);
-  if (!server.startsWith("http://")) {
-    Serial.println("Configuration error: server URL must use http://");
+  if (containsHttpUnsafeCharacters(EINK_FRAME_AUTH_TOKEN) ||
+      containsHttpUnsafeCharacters(EINK_FRAME_SERVER_URL)) {
+    Serial.println("Configuration error: token and server URL must be one line");
     return false;
   }
-  if (!eink::isConcreteMode(requestedMode)) {
+  String server(EINK_FRAME_SERVER_URL);
+  while (server.endsWith("/")) {
+    server.remove(server.length() - 1);
+  }
+  const String authority =
+      server.startsWith("http://") ? server.substring(7) : String();
+  if (authority.length() == 0 || authority.indexOf('/') >= 0 ||
+      authority.indexOf('@') >= 0 || authority.indexOf('?') >= 0 ||
+      authority.indexOf('#') >= 0 ||
+      server.indexOf("replace-with-") >= 0) {
+    Serial.println("Configuration error: provision the Pi http:// server URL");
+    return false;
+  }
+  if (requestedMode != "automatic" && !eink::isConcreteMode(requestedMode)) {
     Serial.println("Configuration error: EINK_DEFAULT_MODE is invalid");
     return false;
   }
   return true;
+}
+
+bool clockIsSynchronized() {
+  // Earlier values indicate the ESP32's unset 1970 software clock.
+  return std::time(nullptr) >= 1704067200;
+}
+
+void configureNetworkTime() {
+  if (!timeServiceConfigured) {
+    configTzTime(EINK_POSIX_TIMEZONE, EINK_NTP_SERVER_1, EINK_NTP_SERVER_2);
+    timeServiceConfigured = true;
+  }
+}
+
+void waitBrieflyForClock() {
+  if (clockIsSynchronized()) {
+    return;
+  }
+  Serial.print("Waiting for network time");
+  const uint32_t started = millis();
+  while (!clockIsSynchronized() &&
+         !elapsed(started, EINK_NTP_SYNC_WAIT_MS)) {
+    Serial.print('.');
+    delay(250);
+  }
+  Serial.println();
+}
+
+String scheduledMode() {
+  const std::time_t now = std::time(nullptr);
+  std::tm local{};
+  if (now < 1704067200 || localtime_r(&now, &local) == nullptr) {
+    if (eink::isConcreteMode(displayedMode)) {
+      Serial.printf("Clock unavailable; retaining %s mode\n",
+                    displayedMode.c_str());
+      return displayedMode;
+    }
+    Serial.println("Clock unavailable; using weather until NTP synchronizes");
+    return "weather";
+  }
+
+  const int minuteOfDay = local.tm_hour * 60 + local.tm_min;
+  if (minuteOfDay >= EINK_STAR_MAP_START_MINUTES ||
+      minuteOfDay < EINK_WEATHER_START_MINUTES) {
+    return "star-map";
+  }
+  if (minuteOfDay >= EINK_BIRDS_START_MINUTES) {
+    return "birds";
+  }
+  return "weather";
+}
+
+bool displayBufferIsReady() {
+  return epaper.created() && epaper.getPointer() != nullptr &&
+         epaper.getColorDepth() == 4 &&
+         epaper.width() == static_cast<int16_t>(eink::kBackingWidth) &&
+         epaper.height() == static_cast<int16_t>(eink::kBackingHeight);
 }
 
 String etagForSha(const String &sha) {
@@ -120,10 +221,12 @@ void loadDisplayState() {
   if (!preferencesReady) {
     return;
   }
+  const bool persistedStateIsValid =
+      preferences.getBool(kPreferenceValid, false);
   displayedMode = preferences.getString(kPreferenceMode, "");
   displayedSha = preferences.getString(kPreferenceSha, "");
   displayedEtag = preferences.getString(kPreferenceEtag, "");
-  if (!eink::isConcreteMode(displayedMode) ||
+  if (!persistedStateIsValid || !eink::isConcreteMode(displayedMode) ||
       !isLowercaseSha256(displayedSha) ||
       displayedEtag != etagForSha(displayedSha)) {
     displayedMode = "";
@@ -131,6 +234,22 @@ void loadDisplayState() {
     displayedEtag = "";
     Serial.println("No valid persisted display checksum; a full pull is required");
   }
+}
+
+bool invalidatePersistedDisplayState() {
+  if (!preferencesReady) {
+    Serial.println(
+        "Cannot establish a power-safe display transaction without NVS");
+    return false;
+  }
+  const bool written = preferences.putBool(kPreferenceValid, false) > 0;
+  const bool verified = !preferences.getBool(kPreferenceValid, true);
+  if (!written || !verified) {
+    Serial.println(
+        "Could not invalidate the old display checksum; panel left unchanged");
+    return false;
+  }
+  return true;
 }
 
 void persistDisplayState(const String &mode, const String &sha,
@@ -142,13 +261,36 @@ void persistDisplayState(const String &mode, const String &sha,
     return;
   }
 
-  // The values cross-check on load. An interrupted series is rejected and
-  // causes a safe full download rather than a false 304 decision.
-  const bool saved = preferences.putString(kPreferenceSha, sha) > 0 &&
-                     preferences.putString(kPreferenceEtag, etag) > 0 &&
-                     preferences.putString(kPreferenceMode, mode) > 0;
-  if (!saved) {
-    Serial.println("Warning: display checksum could not be persisted");
+  // state-valid was committed false before the panel refresh. Save and verify
+  // every field, then make the record visible with one final marker write.
+  // Power loss anywhere before that final write forces an unconditional pull.
+  const bool shaSaved = preferences.putString(kPreferenceSha, sha) > 0;
+  const bool etagSaved = preferences.putString(kPreferenceEtag, etag) > 0;
+  const bool modeSaved = preferences.putString(kPreferenceMode, mode) > 0;
+  const bool fieldsMatch = shaSaved && etagSaved && modeSaved &&
+                           preferences.getString(kPreferenceSha, "") == sha &&
+                           preferences.getString(kPreferenceEtag, "") == etag &&
+                           preferences.getString(kPreferenceMode, "") == mode;
+  const bool committed =
+      fieldsMatch && preferences.putBool(kPreferenceValid, true) > 0 &&
+      preferences.getBool(kPreferenceValid, false);
+  if (!committed) {
+    preferences.putBool(kPreferenceValid, false);
+    Serial.println(
+        "Warning: display checksum remains invalid; next boot will pull fully");
+  }
+}
+
+void persistModeForUnchangedFrame(const String &mode) {
+  displayedMode = mode;
+  if (!preferencesReady) {
+    return;
+  }
+  // Only the descriptive mode changes here; the physical SHA and ETag remain
+  // identical, so either the old or new concrete mode is power-loss safe.
+  if (preferences.putString(kPreferenceMode, mode) == 0 ||
+      preferences.getString(kPreferenceMode, "") != mode) {
+    Serial.println("Warning: unchanged frame mode could not be persisted");
   }
 }
 
@@ -157,7 +299,7 @@ bool connectWifi() {
     return true;
   }
 
-  Serial.printf("Connecting to Wi-Fi SSID %s", EINK_WIFI_SSID);
+  Serial.print("Connecting to Wi-Fi");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
@@ -225,7 +367,10 @@ bool refreshPanel(const uint8_t *verifiedFrame) {
   // The Pi has already rotated landscape pixels into the native 1200x1600
   // Setup510 backing order. Do not call setRotation(), pushImage(), or convert
   // nibbles here.
-  epaper.begin();
+  if (!panelInitialized) {
+    epaper.begin();
+    panelInitialized = true;
+  }
   auto *displayBuffer = static_cast<uint8_t *>(epaper.getPointer());
   if (displayBuffer == nullptr) {
     Serial.println("Seeed_GFX framebuffer allocation failed");
@@ -236,7 +381,8 @@ bool refreshPanel(const uint8_t *verifiedFrame) {
   return true;
 }
 
-SyncResult syncFrame(const String &mode, bool force) {
+SyncResult syncFrame(const String &mode, bool force,
+                     bool bypassValidator = false) {
   if (!eink::isConcreteMode(mode)) {
     Serial.println("Refusing an unsupported frame mode");
     return SyncResult::kFailed;
@@ -245,18 +391,12 @@ SyncResult syncFrame(const String &mode, bool force) {
     return SyncResult::kFailed;
   }
 
-  auto *staging = static_cast<uint8_t *>(heap_caps_malloc(
-      eink::kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (staging == nullptr) {
-    Serial.println("Could not allocate the 960,000-byte PSRAM staging buffer");
-    return SyncResult::kFailed;
-  }
-
   WiFiClient transport;
   HTTPClient http;
   http.setConnectTimeout(EINK_HTTP_CONNECT_TIMEOUT_MS);
   http.setTimeout(EINK_HTTP_READ_TIMEOUT_MS);
   http.useHTTP10(true);
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
   const char *headerNames[] = {
       "ETag",          "Content-Type",       "X-Frame-Format",
@@ -268,20 +408,45 @@ SyncResult syncFrame(const String &mode, bool force) {
   const String url = frameUrl(mode);
   if (!http.begin(transport, url)) {
     Serial.println("Could not initialize the HTTP request");
-    heap_caps_free(staging);
     return SyncResult::kFailed;
   }
   http.addHeader("Authorization",
                  String("Bearer ") + EINK_FRAME_AUTH_TOKEN);
-  if (!force && displayedMode == mode && displayedEtag.length() > 0) {
+  http.addHeader("Accept", eink::kContentType);
+  http.addHeader("Accept-Encoding", "identity");
+  if (!force && !bypassValidator && isLowercaseSha256(displayedSha) &&
+      displayedEtag == etagForSha(displayedSha)) {
     http.addHeader("If-None-Match", displayedEtag);
   }
 
   Serial.printf("Checking %s frame\n", mode.c_str());
   const int status = http.GET();
   if (status == HTTP_CODE_NOT_MODIFIED) {
+    String responseEtag = http.header("ETag");
+    String responseSha = http.header("X-Frame-SHA256");
+    String responseContentSha = http.header("X-Content-SHA256");
+    String responseFormat = http.header("X-Frame-Format");
+    responseEtag.trim();
+    responseSha.trim();
+    responseContentSha.trim();
+    responseFormat.trim();
+    const bool validNotModified = !force && !bypassValidator &&
+                                  isLowercaseSha256(displayedSha) &&
+                                  responseEtag == displayedEtag &&
+                                  responseSha == displayedSha &&
+                                  responseContentSha == displayedSha &&
+                                  responseFormat == eink::kWireFormat;
     http.end();
-    heap_caps_free(staging);
+    if (!validNotModified) {
+      Serial.println("Invalid 304 response; retrying once without a validator");
+      if (!force && !bypassValidator) {
+        return syncFrame(mode, false, true);
+      }
+      return SyncResult::kFailed;
+    }
+    if (displayedMode != mode) {
+      persistModeForUnchangedFrame(mode);
+    }
     Serial.println("Frame is unchanged; skipping the slow e-paper refresh");
     return SyncResult::kNotModified;
   }
@@ -289,7 +454,6 @@ SyncResult syncFrame(const String &mode, bool force) {
     Serial.printf("Frame server returned HTTP %d; panel left unchanged\n",
                   status);
     http.end();
-    heap_caps_free(staging);
     return SyncResult::kFailed;
   }
 
@@ -312,7 +476,14 @@ SyncResult syncFrame(const String &mode, bool force) {
   if (!validHeaders) {
     Serial.println("Frame response contract is invalid; panel left unchanged");
     http.end();
-    heap_caps_free(staging);
+    return SyncResult::kFailed;
+  }
+
+  auto *staging = static_cast<uint8_t *>(heap_caps_malloc(
+      eink::kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (staging == nullptr) {
+    Serial.println("Could not allocate the 960,000-byte PSRAM staging buffer");
+    http.end();
     return SyncResult::kFailed;
   }
 
@@ -332,6 +503,24 @@ SyncResult syncFrame(const String &mode, bool force) {
   }
   if (!eink::hasOnlySupportedColors(staging, eink::kFrameBytes)) {
     Serial.println("Frame contains unsupported EE02 color nibbles");
+    heap_caps_free(staging);
+    return SyncResult::kFailed;
+  }
+
+  // A compliant server returns 304 for this case. This second guard also
+  // prevents a redundant physical refresh behind a proxy that returned 200.
+  if (!force && actualSha == displayedSha && etag == displayedEtag) {
+    heap_caps_free(staging);
+    if (displayedMode != mode) {
+      persistModeForUnchangedFrame(mode);
+    }
+    Serial.println("Downloaded frame matches the display; refresh skipped");
+    return SyncResult::kNotModified;
+  }
+
+  // Invalidate the old persisted checksum before touching physical pixels.
+  // This closes the power-loss window between epaper.update() and NVS writes.
+  if (!invalidatePersistedDisplayState()) {
     heap_caps_free(staging);
     return SyncResult::kFailed;
   }
@@ -361,6 +550,9 @@ void handleSerialCommand() {
   while (Serial.available() > 0) {
     const char command = static_cast<char>(Serial.read());
     switch (command) {
+      case 'a':
+        requestMode("automatic");
+        break;
       case 'w':
         requestMode("weather");
         break;
@@ -393,7 +585,8 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("EE02 network frame client starting");
-  Serial.println("Commands: w=weather b=birds s=star-map p=photo t=test r=refresh");
+  Serial.println(
+      "Commands: a=automatic w=weather b=birds s=star-map p=photo t=test r=refresh");
 
   if (!psramFound()) {
     Serial.println("Fatal: EE02 firmware requires the XIAO ESP32S3 PSRAM target");
@@ -401,29 +594,58 @@ void setup() {
   }
   Serial.printf("Free PSRAM: %u bytes\n",
                 static_cast<unsigned>(ESP.getFreePsram()));
+  if (!displayBufferIsReady()) {
+    Serial.println("Fatal: Seeed_GFX did not allocate a 1200x1600 4bpp sprite");
+    return;
+  }
 
   preferencesReady = preferences.begin(kPreferencesNamespace, false);
   if (!preferencesReady) {
-    Serial.println("Warning: NVS display checksum storage is unavailable");
+    Serial.println(
+        "Fatal: NVS is required for power-safe display checksum storage");
+    return;
   }
   loadDisplayState();
 
   if (!configurationIsUsable()) {
-    pollImmediately = false;
     return;
   }
-  connectWifi();
+  runtimeEnabled = true;
 }
 
 void loop() {
   handleSerialCommand();
-  if ((pollImmediately || elapsed(lastPollStarted, EINK_POLL_INTERVAL_MS)) &&
-      configurationIsUsable() && psramFound()) {
+  if (!runtimeEnabled) {
+    delay(100);
+    return;
+  }
+  const uint32_t pollInterval = forceNextDownload
+                                    ? EINK_FORCE_RETRY_INTERVAL_MS
+                                    : EINK_POLL_INTERVAL_MS;
+  if ((pollImmediately || elapsed(lastPollStarted, pollInterval)) &&
+      psramFound()) {
     pollImmediately = false;
     lastPollStarted = millis();
-    syncFrame(requestedMode, forceNextDownload);
-    forceNextDownload = false;
+    String effectiveMode = requestedMode;
+    bool networkReady = true;
+    if (requestedMode == "automatic") {
+      networkReady = connectWifi();
+      if (networkReady) {
+        configureNetworkTime();
+        waitBrieflyForClock();
+      }
+      effectiveMode = scheduledMode();
+    }
+    SyncResult result = SyncResult::kFailed;
+    if (networkReady) {
+      result = syncFrame(effectiveMode, forceNextDownload);
+    }
+    if (!forceNextDownload || result == SyncResult::kUpdated) {
+      forceNextDownload = false;
+    } else {
+      lastPollStarted = millis();
+      Serial.println("Forced refresh is still pending and will be retried");
+    }
   }
   delay(10);
 }
-

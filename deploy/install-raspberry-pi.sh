@@ -159,6 +159,21 @@ reject_dangerous_directory "$INSTALL_DIR" "--install-dir"
 reject_dangerous_directory "$CONFIG_DIR" "--config-dir"
 reject_dangerous_directory "$STATE_DIR" "--state-dir"
 
+reject_overlapping_directories() {
+    local first="$1" first_label="$2" second="$3" second_label="$4"
+    if [[ "$first" == "$second" || "$first" == "$second/"* || \
+          "$second" == "$first/"* ]]; then
+        die "$first_label and $second_label must not overlap"
+    fi
+}
+
+reject_overlapping_directories "$INSTALL_DIR" "--install-dir" \
+    "$CONFIG_DIR" "--config-dir"
+reject_overlapping_directories "$INSTALL_DIR" "--install-dir" \
+    "$STATE_DIR" "--state-dir"
+reject_overlapping_directories "$CONFIG_DIR" "--config-dir" \
+    "$STATE_DIR" "--state-dir"
+
 if [[ -n "$DESTDIR" ]]; then
     [[ "$DESTDIR" = /* && "$DESTDIR" != / ]] \
         || die "--destdir must be an absolute directory other than /"
@@ -170,6 +185,9 @@ if "$UNINSTALL" && { "$FORCE_CONFIG" || "$ROTATE_TOKEN"; }; then
 fi
 
 if ! "$UNINSTALL"; then
+    if [[ -z "$DESTDIR" && "$SOURCE_DIR" == "$INSTALL_DIR" ]]; then
+        die "run the installer from a checkout outside --install-dir"
+    fi
     for required in \
         "$SOURCE_DIR/pyproject.toml" \
         "$SOURCE_DIR/display_runtime/config.example.toml" \
@@ -211,7 +229,7 @@ reject_symlink() {
 remove_managed_application() {
     local item
     for item in .venv .venv.new .venv.rollback playwright display_runtime README.md \
-        install-raspberry-pi.sh INSTALLATION; do
+        install-raspberry-pi.sh INSTALLATION .units.rollback; do
         rm -rf -- "$INSTALL_FS/$item"
     done
     rmdir -- "$INSTALL_FS" 2>/dev/null || true
@@ -295,8 +313,13 @@ reject_symlink "$INSTALL_FS" "install directory"
 reject_symlink "$CONFIG_FS" "configuration directory"
 reject_symlink "$STATE_FS" "state directory"
 install -d -m 0755 "$INSTALL_FS" "$UNIT_FS"
-install -d -m 0750 "$CONFIG_FS" "$STATE_FS" "$STATE_FS/cache" \
-    "$STATE_FS/cache/matplotlib" "$STATE_FS/frames" "$STATE_FS/uploads"
+install -d -m 0750 "$CONFIG_FS" "$STATE_FS"
+for managed_state_path in cache cache/matplotlib frames uploads; do
+    reject_symlink "$STATE_FS/$managed_state_path" \
+        "managed state path $managed_state_path"
+done
+install -d -m 0750 "$STATE_FS/cache" "$STATE_FS/cache/matplotlib" \
+    "$STATE_FS/frames" "$STATE_FS/uploads"
 if [[ -z "$DESTDIR" ]]; then
     chown root:root "$INSTALL_FS"
     chown root:"$SERVICE_GROUP" "$CONFIG_FS"
@@ -312,6 +335,10 @@ install_configuration() {
         if [[ -e "$CONFIG_PATH_FS" ]]; then
             backup="$CONFIG_PATH_FS.backup.$(date -u +%Y%m%dT%H%M%SZ)"
             cp -p -- "$CONFIG_PATH_FS" "$backup"
+            chmod 0640 "$backup"
+            if [[ -z "$DESTDIR" ]]; then
+                chown root:"$SERVICE_GROUP" "$backup"
+            fi
             log "backed up the previous runtime configuration"
         fi
         temporary="$(mktemp "$CONFIG_FS/.runtime.toml.XXXXXX")"
@@ -399,13 +426,121 @@ render_units() {
 }
 
 NEW_VENV=""
+ACTIVE_VENV="$INSTALL_FS/.venv"
 OLD_VENV="$INSTALL_FS/.venv.rollback"
+UNIT_BACKUP_DIR="$INSTALL_FS/.units.rollback"
+POST_SWAP_ACTIVE=false
+UNIT_WAS_ENABLED=()
+UNIT_WAS_ACTIVE=()
 cleanup_new_venv() {
     if [[ -n "$NEW_VENV" && -d "$NEW_VENV" ]]; then
         rm -rf -- "$NEW_VENV"
     fi
 }
-trap cleanup_new_venv EXIT
+
+repair_venv_paths() {
+    # Python console scripts and activation helpers embed the absolute venv
+    # created path. Rewrite that prefix after the atomic directory swap; the
+    # Python executable itself is relocatable, but an old shebang is not.
+    local old_prefix="$1" new_prefix="$2" file
+    while IFS= read -r -d '' file; do
+        if grep -IqF -- "$old_prefix" "$file"; then
+            sed -i "s|$old_prefix|$new_prefix|g" "$file"
+        fi
+    done < <(find "$new_prefix/bin" -maxdepth 1 -type f -print0)
+    if grep -qF -- "$old_prefix" "$new_prefix/pyvenv.cfg"; then
+        sed -i "s|$old_prefix|$new_prefix|g" "$new_prefix/pyvenv.cfg"
+    fi
+}
+
+restore_previous_venv() {
+    rm -rf -- "$ACTIVE_VENV"
+    if [[ -d "$OLD_VENV" ]]; then
+        mv -- "$OLD_VENV" "$ACTIVE_VENV"
+    fi
+}
+
+backup_units_and_systemd_state() {
+    local unit source index
+    rm -rf -- "$UNIT_BACKUP_DIR"
+    install -d -m 0700 "$UNIT_BACKUP_DIR"
+    for unit in "${MANAGED_UNITS[@]}"; do
+        source="$UNIT_FS/$unit"
+        reject_symlink "$source" "existing systemd unit"
+        if [[ -f "$source" ]]; then
+            cp -p -- "$source" "$UNIT_BACKUP_DIR/$unit"
+        fi
+    done
+
+    UNIT_WAS_ENABLED=()
+    UNIT_WAS_ACTIVE=()
+    for index in "${!ENABLED_UNITS[@]}"; do
+        unit="${ENABLED_UNITS[$index]}"
+        if systemctl is-enabled --quiet "$unit" >/dev/null 2>&1; then
+            UNIT_WAS_ENABLED+=(true)
+        else
+            UNIT_WAS_ENABLED+=(false)
+        fi
+        if systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
+            UNIT_WAS_ACTIVE+=(true)
+        else
+            UNIT_WAS_ACTIVE+=(false)
+        fi
+    done
+}
+
+rollback_post_swap() {
+    local unit index
+    log "rolling back the virtual environment and systemd units"
+    # Disable/stop units that were introduced by this run while their new
+    # [Install] metadata is still present on disk.
+    for index in "${!ENABLED_UNITS[@]}"; do
+        unit="${ENABLED_UNITS[$index]}"
+        if [[ "${UNIT_WAS_ENABLED[$index]:-false}" != true ]]; then
+            systemctl disable "$unit" >/dev/null 2>&1 || true
+        fi
+        if [[ "${UNIT_WAS_ACTIVE[$index]:-false}" != true ]]; then
+            systemctl stop "$unit" >/dev/null 2>&1 || true
+        fi
+    done
+
+    restore_previous_venv
+    for unit in "${MANAGED_UNITS[@]}"; do
+        rm -f -- "$UNIT_FS/$unit"
+        if [[ -f "$UNIT_BACKUP_DIR/$unit" ]]; then
+            cp -p -- "$UNIT_BACKUP_DIR/$unit" "$UNIT_FS/$unit"
+            chmod 0644 "$UNIT_FS/$unit"
+            chown root:root "$UNIT_FS/$unit"
+        fi
+    done
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    for index in "${!ENABLED_UNITS[@]}"; do
+        unit="${ENABLED_UNITS[$index]}"
+        if [[ "${UNIT_WAS_ENABLED[$index]:-false}" == true ]]; then
+            systemctl enable "$unit" >/dev/null 2>&1 || true
+        else
+            systemctl disable "$unit" >/dev/null 2>&1 || true
+        fi
+        if [[ "${UNIT_WAS_ACTIVE[$index]:-false}" == true ]]; then
+            systemctl restart "$unit" >/dev/null 2>&1 || true
+        else
+            systemctl stop "$unit" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
+finish_install() {
+    local status="$?"
+    trap - EXIT
+    set +e
+    if [[ "$status" -ne 0 && "$POST_SWAP_ACTIVE" == true ]]; then
+        rollback_post_swap
+    fi
+    cleanup_new_venv
+    exit "$status"
+}
+trap finish_install EXIT
 
 if [[ -z "$DESTDIR" ]]; then
     NEW_VENV="$INSTALL_FS/.venv.new"
@@ -455,11 +590,18 @@ if [[ -z "$DESTDIR" ]]; then
         || die "test-pattern smoke did not create an exact 960000-byte EE02 frame"
     rm -rf -- "$SMOKE_DIR"
 
-    if [[ -d "$INSTALL_FS/.venv" ]]; then
-        mv -- "$INSTALL_FS/.venv" "$OLD_VENV"
+    backup_units_and_systemd_state
+    POST_SWAP_ACTIVE=true
+    BUILT_VENV="$NEW_VENV"
+    if [[ -d "$ACTIVE_VENV" ]]; then
+        mv -- "$ACTIVE_VENV" "$OLD_VENV"
     fi
-    mv -- "$NEW_VENV" "$INSTALL_FS/.venv"
+    mv -- "$NEW_VENV" "$ACTIVE_VENV"
     NEW_VENV=""
+    repair_venv_paths "$BUILT_VENV" "$ACTIVE_VENV"
+    if ! "$ACTIVE_VENV/bin/eink-display" --version >/dev/null; then
+        die "the activated virtual environment failed its final-path check"
+    fi
 fi
 
 cat >"$INSTALL_FS/INSTALLATION" <<EOF
@@ -488,20 +630,13 @@ if [[ -z "$DESTDIR" ]]; then
         if ! "$NO_START"; then
             log "starting frame server and render timers"
             if ! systemctl restart "$SERVER_UNIT"; then
-                log "server restart failed; restoring the previous virtual environment"
-                if [[ -d "$OLD_VENV" ]]; then
-                    rm -rf -- "$INSTALL_FS/.venv"
-                    mv -- "$OLD_VENV" "$INSTALL_FS/.venv"
-                    systemctl restart "$SERVER_UNIT" >/dev/null 2>&1 || true
-                else
-                    log "no previous environment exists; retained the new environment for diagnosis"
-                fi
-                exit 1
+                die "server restart failed"
             fi
             systemctl restart "$WEATHER_TIMER" "$BIRDS_TIMER" "$STAR_TIMER"
         fi
     fi
-    rm -rf -- "$OLD_VENV"
+    POST_SWAP_ACTIVE=false
+    rm -rf -- "$OLD_VENV" "$UNIT_BACKUP_DIR"
 fi
 
 log "installation complete"

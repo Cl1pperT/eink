@@ -6,6 +6,8 @@ After=network-online.target
 ConditionPathIsDirectory=@EINK_INSTALL_DIR@
 ConditionPathIsDirectory=@EINK_STATE_DIR@
 ConditionPathExists=@EINK_CONFIG_PATH@
+StartLimitIntervalSec=6h
+StartLimitBurst=8
 
 [Service]
 Type=oneshot
@@ -25,6 +27,8 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # those missed runs are replayed at boot.
 ExecStart=/usr/bin/flock --wait 900 @EINK_STATE_DIR@/.render-scheduler.lock @EINK_INSTALL_DIR@/.venv/bin/eink-display --config @EINK_CONFIG_PATH@ render %i --json
 TimeoutStartSec=30min
+Restart=on-failure
+RestartSec=15min
 UMask=0077
 
 # Chromium needs user namespaces and executable JIT memory, so this deliberately

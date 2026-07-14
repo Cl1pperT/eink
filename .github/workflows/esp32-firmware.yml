@@ -1,0 +1,32 @@
+name: ESP32 EE02 firmware
+
+on:
+  push:
+    paths:
+      - "firmware/esp32-ee02/**"
+      - ".github/workflows/esp32-firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/esp32-ee02/**"
+      - ".github/workflows/esp32-firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pinned PlatformIO Core
+        run: python -m pip install platformio==6.1.19
+      - name: Compile the exact production target
+        run: pio run --project-dir firmware/esp32-ee02 --environment ee02
+      - name: Report firmware size
+        run: pio run --project-dir firmware/esp32-ee02 --environment ee02 --target size

@@ -28,6 +28,7 @@ from .ee02 import (
     EE02_NAMED_COLOR_CODES,
     EE02_PAYLOAD_BYTES,
     EE02_WIRE_FORMAT,
+    has_only_ee02_color_nibbles,
 )
 
 
@@ -272,6 +273,10 @@ def _open_verified_frame(
             block = handle.read(1024 * 1024)
             if not block:
                 break
+            if not has_only_ee02_color_nibbles(block):
+                raise ArtifactUnavailable(
+                    "frame payload contains unsupported EE02 color nibbles"
+                )
             digest.update(block)
         if digest.hexdigest() != sha256:
             raise ArtifactUnavailable("frame payload failed SHA-256 verification")

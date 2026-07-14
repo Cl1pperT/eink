@@ -12,14 +12,10 @@ HTTP server publishes only committed artifacts, and the simulated ESP client
 verifies and atomically activates the exact bytes that firmware should pull.
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[integrations]'
-python3 -m display_runtime check
-python3 -m display_runtime render test-pattern
-DISPLAY_RUNTIME_AUTH_TOKEN='<a-long-random-token>' \
-  python3 -m display_runtime serve
-DISPLAY_RUNTIME_AUTH_TOKEN='<the-same-token>' \
-  python3 -m display_runtime esp-sync test-pattern
+sudo ./deploy/install-raspberry-pi.sh
+sudoedit /etc/eink-display/runtime.toml
+sudo systemctl start eink-display-render@test-pattern.service
+systemctl status eink-display-server.service
 ```
 
 Production source rendering fails closed by default: live-source failures never
@@ -27,6 +23,23 @@ publish demo content over an existing valid frame. See
 [display_runtime/README.md](display_runtime/README.md) for Raspberry Pi setup,
 TOML configuration, CLI commands, the authenticated frame API, ETag behavior,
 and the ESP32 pull/verification contract.
+
+## ESP32 display firmware
+
+[`firmware/esp32-ee02`](firmware/esp32-ee02/) is a compiling
+PlatformIO/Arduino client for the Seeed XIAO ESP32S3, EE02 driver board, and
+13.3-inch T133A01 Spectra 6 panel. It authenticates to the Pi, revalidates with
+ETags, downloads into PSRAM, verifies the exact 960,000-byte payload and
+SHA-256, and refreshes through pinned Seeed_GFX Setup510 only after validation.
+The Pi performs landscape rotation; the ESP32 copies native backing bytes
+without another transform. NTP-backed automatic mode switches between the
+morning weather, daytime birds, and nighttime star map schedules.
+
+```bash
+cd firmware/esp32-ee02
+cp include/secrets.example.h include/secrets.h
+pio run
+```
 
 ## Desktop Display Simulator
 

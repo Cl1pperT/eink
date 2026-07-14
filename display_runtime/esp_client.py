@@ -20,6 +20,7 @@ from .ee02 import (
     EE02_NAMED_COLOR_CODES,
     EE02_PAYLOAD_BYTES,
     EE02_WIRE_FORMAT,
+    has_only_ee02_color_nibbles,
 )
 from .runtime import SCHEMA_VERSION, canonical_mode
 
@@ -67,17 +68,17 @@ class ESPPullResult:
         }
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _valid_frame(path: Path, sha256: str) -> bool:
     try:
-        return path.stat().st_size == EE02_PAYLOAD_BYTES and _sha256_file(path) == sha256
+        if path.stat().st_size != EE02_PAYLOAD_BYTES:
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                if not has_only_ee02_color_nibbles(block):
+                    return False
+                digest.update(block)
+        return digest.hexdigest() == sha256
     except OSError:
         return False
 
@@ -353,6 +354,10 @@ class SimulatedESPClient:
                     received += len(block)
                     if received > expected_bytes:
                         raise ESPProtocolError("frame response exceeded the declared EE02 buffer size")
+                    if not has_only_ee02_color_nibbles(block):
+                        raise ESPProtocolError(
+                            "frame response contains unsupported EE02 color nibbles"
+                        )
                     digest.update(block)
                     handle.write(block)
                 if received != expected_bytes:
@@ -395,6 +400,10 @@ class SimulatedESPClient:
                         copied += len(block)
                         if copied > EE02_PAYLOAD_BYTES:
                             raise ESPProtocolError("cached frame exceeds the EE02 buffer size")
+                        if not has_only_ee02_color_nibbles(block):
+                            raise ESPProtocolError(
+                                "cached frame contains unsupported EE02 color nibbles"
+                            )
                         digest.update(block)
                         target.write(block)
                 if copied != EE02_PAYLOAD_BYTES or digest.hexdigest() != sha256:

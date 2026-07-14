@@ -2,7 +2,7 @@
 Description=Render the nighttime star-map frame each day
 
 [Timer]
-OnCalendar=*-*-* 20:00:00
+OnCalendar=*-*-* 19:55:00
 AccuracySec=1min
 RandomizedDelaySec=30s
 Persistent=true
