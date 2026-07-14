@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from threading import Thread
+from threading import BoundedSemaphore, Thread
 from typing import BinaryIO, Iterator, Mapping
 from urllib.parse import urlsplit
 
@@ -39,6 +39,8 @@ MANIFEST_SCHEMA_VERSION = 2
 FRAME_CONTENT_TYPE = "application/vnd.seeed.ee02-4bpp"
 MAX_MANIFEST_BYTES = 1024 * 1024
 DEFAULT_CHUNK_SIZE = 64 * 1024
+DEFAULT_MAX_CONNECTIONS = 8
+DEFAULT_REQUEST_TIMEOUT = 15.0
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _MANIFEST_PATH_RE = re.compile(r"/v1/manifest/([^/]+)\Z")
@@ -279,7 +281,7 @@ def _open_verified_frame(
         if handle is not None:
             handle.close()
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         if handle is not None:
             handle.close()
         raise ArtifactUnavailable("frame payload cannot be read safely") from exc
@@ -303,18 +305,54 @@ class FrameServer(ThreadingHTTPServer):
         output_directory: str | Path,
         auth_token: str,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         log_requests: bool = True,
     ) -> None:
         token = str(auth_token)
         if not token:
             raise ValueError("auth_token must not be empty")
+        if "\r" in token or "\n" in token:
+            raise ValueError("auth_token must be a single line")
         if type(chunk_size) is not int or chunk_size <= 0:
             raise ValueError("chunk_size must be a positive integer")
+        if type(max_connections) is not int or max_connections <= 0:
+            raise ValueError("max_connections must be a positive integer")
+        if (
+            isinstance(request_timeout, bool)
+            or not isinstance(request_timeout, (int, float))
+            or request_timeout <= 0
+        ):
+            raise ValueError("request_timeout must be a positive number")
         self.output_directory = Path(output_directory).expanduser().resolve()
         self.auth_token = token.encode("utf-8")
         self.chunk_size = chunk_size
+        self.max_connections = max_connections
+        self.request_timeout = float(request_timeout)
+        self._worker_slots = BoundedSemaphore(max_connections)
         self.log_requests = bool(log_requests)
         super().__init__(server_address, FrameRequestHandler)
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self.request_timeout)
+        return request, client_address
+
+    def process_request(self, request, client_address) -> None:
+        # Acquire before ThreadingMixIn creates a thread, so slow or malicious
+        # clients can never create an unbounded number of Pi worker threads.
+        self._worker_slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
 
     def start_in_thread(self, *, name: str = "display-frame-server") -> Thread:
         """Start ``serve_forever`` in a daemon thread and return that thread."""
@@ -579,6 +617,8 @@ def running_frame_server(
     host: str = "127.0.0.1",
     port: int = 0,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
+    max_connections: int = DEFAULT_MAX_CONNECTIONS,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     log_requests: bool = False,
 ) -> Iterator[FrameServer]:
     """Run a frame server in a background thread for a bounded scope."""
@@ -588,6 +628,8 @@ def running_frame_server(
         output_directory=output_directory,
         auth_token=auth_token,
         chunk_size=chunk_size,
+        max_connections=max_connections,
+        request_timeout=request_timeout,
         log_requests=log_requests,
     )
     thread = server.start_in_thread()
@@ -604,6 +646,8 @@ __all__ = [
     "ArtifactUnavailable",
     "CONCRETE_MODES",
     "DEFAULT_CHUNK_SIZE",
+    "DEFAULT_MAX_CONNECTIONS",
+    "DEFAULT_REQUEST_TIMEOUT",
     "FRAME_CONTENT_TYPE",
     "FrameRequestHandler",
     "FrameServer",

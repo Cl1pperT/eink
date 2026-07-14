@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -7,9 +8,8 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
-from typing import Any, BinaryIO, Mapping
+from typing import Any, Iterator, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -28,6 +28,7 @@ ESP_STATE_VERSION = 1
 DEFAULT_CHUNK_SIZE = 64 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STRONG_SHA256_ETAG = re.compile(r'^"sha256-[0-9a-f]{64}"$')
 _FRAME_CONTENT_TYPES = {
     "application/octet-stream",
     "application/vnd.seeed.ee02-4bpp",
@@ -225,6 +226,8 @@ class SimulatedESPClient:
             raise ValueError("server_url must not contain a query string or fragment")
         if not isinstance(token, str) or not token:
             raise ValueError("an authentication token is required")
+        if "\r" in token or "\n" in token:
+            raise ValueError("the authentication token must be a single line")
         if timeout <= 0 or chunk_size <= 0:
             raise ValueError("timeout and chunk_size must be greater than zero")
         self.server_url = server_url.rstrip("/")
@@ -284,7 +287,7 @@ class SimulatedESPClient:
         except (URLError, TimeoutError, OSError) as exc:
             raise ESPClientError(f"could not reach frame server: {exc}") from exc
 
-    def _read_manifest(self, response: Any) -> tuple[dict[str, Any], str]:
+    def _read_manifest(self, response: Any) -> tuple[dict[str, Any], str, str]:
         content_type = _header(response, "Content-Type").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             raise ESPProtocolError("manifest response is not application/json")
@@ -303,9 +306,13 @@ class SimulatedESPClient:
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ESPProtocolError("manifest response is not valid JSON") from exc
         etag = _header(response, "ETag")
-        if not etag:
-            raise ESPProtocolError("manifest response has no ETag")
-        return value, etag
+        expected_etag = f'"sha256-{hashlib.sha256(payload).hexdigest()}"'
+        if etag != expected_etag:
+            raise ESPProtocolError("manifest response has an invalid representation ETag")
+        frame_etag = _header(response, "X-Frame-ETag")
+        if not frame_etag:
+            raise ESPProtocolError("manifest response has no frame ETag")
+        return value, etag, frame_etag
 
     def _download_frame(self, mode: str, sha256: str, expected_bytes: int) -> tuple[Path, str]:
         response, not_modified = self._request(
@@ -363,14 +370,10 @@ class SimulatedESPClient:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    def _activate(self, cached: Path, mode: str, sha256: str, state: Mapping[str, Any]) -> bool:
-        display = state.get("display")
-        already_active = (
-            isinstance(display, dict)
-            and display.get("sha256") == sha256
-            and display.get("mode") == mode
-            and _valid_frame(self.frame_path, sha256)
-        )
+    def _activate(self, cached: Path, sha256: str) -> bool:
+        # The physical refresh decision is solely about bytes. Two modes that
+        # happen to encode to the same wire SHA do not need an extra refresh.
+        already_active = _valid_frame(self.frame_path, sha256)
         if already_active:
             return False
 
@@ -382,8 +385,20 @@ class SimulatedESPClient:
                 dir=self.state_directory, delete=False,
             ) as target:
                 temporary = Path(target.name)
+                digest = hashlib.sha256()
+                copied = 0
                 with cached.open("rb") as source:
-                    shutil.copyfileobj(source, target, length=self.chunk_size)
+                    while True:
+                        block = source.read(self.chunk_size)
+                        if not block:
+                            break
+                        copied += len(block)
+                        if copied > EE02_PAYLOAD_BYTES:
+                            raise ESPProtocolError("cached frame exceeds the EE02 buffer size")
+                        digest.update(block)
+                        target.write(block)
+                if copied != EE02_PAYLOAD_BYTES or digest.hexdigest() != sha256:
+                    raise ESPProtocolError("cached frame changed before it could be activated")
                 target.flush()
                 os.fsync(target.fileno())
             os.replace(temporary, self.frame_path)
@@ -394,7 +409,30 @@ class SimulatedESPClient:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
+    @contextmanager
+    def _sync_lock(self) -> Iterator[None]:
+        self.state_directory.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_directory / ".sync.lock"
+        with lock_path.open("a+b") as handle:
+            try:
+                import fcntl
+            except ImportError:  # pragma: no cover - target platforms are macOS/Linux
+                yield
+                return
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def pull(self, requested_mode: str) -> ESPPullResult:
+        # One physical buffer and one state pointer are shared by all modes.
+        # Holding the lock for the full transaction prevents concurrent button
+        # or scheduler pulls from committing a mismatched buffer/state pair.
+        with self._sync_lock():
+            return self._pull_locked(requested_mode)
+
+    def _pull_locked(self, requested_mode: str) -> ESPPullResult:
         mode = canonical_mode(requested_mode)
         if mode == "automatic":
             raise ValueError("the ESP client needs a concrete mode, not automatic")
@@ -406,7 +444,14 @@ class SimulatedESPClient:
         cached = self.frames_directory / f"{saved_sha}.ee02" if _SHA256.fullmatch(saved_sha) else None
         cache_valid = cached is not None and _valid_frame(cached, saved_sha)
 
-        conditional_etag = saved.get("manifest_etag", "") if cache_valid else ""
+        saved_etag = saved.get("manifest_etag")
+        conditional_etag = (
+            saved_etag
+            if cache_valid
+            and isinstance(saved_etag, str)
+            and _STRONG_SHA256_ETAG.fullmatch(saved_etag)
+            else ""
+        )
         response, not_modified = self._request(
             f"/v1/manifest/{quote(mode, safe='')}", etag=conditional_etag
         )
@@ -416,14 +461,21 @@ class SimulatedESPClient:
                 if not_modified or response is None:
                     raise ESPProtocolError("unconditional manifest request returned not modified")
             else:
-                changed = self._activate(cached, mode, saved_sha, state)
+                changed = self._activate(cached, saved_sha)
                 next_state = dict(state)
                 next_state["display"] = {
                     "mode": mode,
                     "sha256": saved_sha,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
-                _atomic_json(next_state, self.state_path)
+                display = state.get("display")
+                display_state_matches = (
+                    isinstance(display, dict)
+                    and display.get("mode") == mode
+                    and display.get("sha256") == saved_sha
+                )
+                if changed or not display_state_matches:
+                    _atomic_json(next_state, self.state_path)
                 return ESPPullResult(
                     mode=mode,
                     changed=changed,
@@ -438,19 +490,23 @@ class SimulatedESPClient:
         if response is None:
             raise ESPProtocolError("manifest request returned no response")
         try:
-            manifest, manifest_etag = self._read_manifest(response)
+            manifest, manifest_etag, advertised_frame_etag = self._read_manifest(response)
         finally:
             response.close()
         sha256, expected_bytes = _validate_manifest(manifest, mode)
+        if not _etag_matches_sha256(advertised_frame_etag, sha256):
+            raise ESPProtocolError("manifest frame ETag disagrees with its wire checksum")
         cached = self.frames_directory / f"{sha256}.ee02"
         if _valid_frame(cached, sha256):
-            frame_etag = str(saved.get("frame_etag", "")) if saved_sha == sha256 else f'"sha256:{sha256}"'
+            frame_etag = advertised_frame_etag
             status = "verified-cache"
         else:
             cached, frame_etag = self._download_frame(mode, sha256, expected_bytes)
+            if frame_etag != advertised_frame_etag:
+                raise ESPProtocolError("frame response ETag disagrees with the manifest response")
             status = "downloaded"
 
-        changed = self._activate(cached, mode, sha256, state)
+        changed = self._activate(cached, sha256)
         next_state = dict(state)
         modes = dict(state["modes"])
         modes[mode] = {
@@ -469,7 +525,7 @@ class SimulatedESPClient:
         return ESPPullResult(
             mode=mode,
             changed=changed,
-            status=status if changed else "not-modified",
+            status=status,
             sha256=sha256,
             bytes=expected_bytes,
             frame_path=self.frame_path,

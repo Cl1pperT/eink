@@ -65,6 +65,8 @@ port = 8787
 # in this file. The server and simulated client refuse to run without a token.
 auth_token = ""
 chunk_size = 65536
+max_connections = 8
+request_timeout = 15.0
 
 [esp_client]
 server_url = "http://127.0.0.1:8787"

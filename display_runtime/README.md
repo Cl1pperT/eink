@@ -6,7 +6,8 @@ code as the desktop simulator, but it never imports Tkinter or opens a window.
 
 The runtime produces both a validated six-color PNG and the exact raw Seeed
 EE02/T133A01 4bpp backing buffer, then atomically maintains one last-known-good
-frame per mode. It does not yet expose the artifacts over HTTP.
+frame per mode. Its authenticated HTTP pull service exposes only committed
+manifests and verified EE02 payloads; it never renders in an HTTP request.
 
 ## Raspberry Pi installation
 
@@ -56,6 +57,8 @@ python3 -m display_runtime render test-pattern
 python3 -m display_runtime render weather
 python3 -m display_runtime render automatic
 python3 -m display_runtime status
+DISPLAY_RUNTIME_AUTH_TOKEN='<a-long-random-token>' \
+  python3 -m display_runtime serve
 ```
 
 After installing the package, the equivalent console command is
@@ -82,6 +85,91 @@ Automatic mode uses the configured local timezone and schedule and never
 allows fixture, demo, sample, or synthetic fallbacks. That prevents a failed
 weather request, BirdNET host, browser, or astronomy dependency from replacing
 a valid physical frame with convincing-looking fake data.
+
+## HTTP frame server
+
+Create a long random bearer token and provide the same value to the Pi service
+and the ESP32. Prefer the environment variable so the secret is not stored in
+the TOML file or exposed in a process argument:
+
+```bash
+export DISPLAY_RUNTIME_AUTH_TOKEN='<a-long-random-token>'
+python3 -m display_runtime serve
+```
+
+`serve` reads `server.host`, `server.port`, `server.chunk_size`,
+`server.max_connections`, and `server.request_timeout` from the configuration.
+The bounded connection pool and timeout keep slow clients from exhausting the
+Pi. `--host`, `--port`, and `--output-dir` override their matching values.
+For a service manager, a service-account-readable token file is also supported:
+
+```bash
+python3 -m display_runtime serve \
+  --token-file /etc/eink-display/frame-server.token
+```
+
+The file must contain a non-empty, single-line token. Restrict it to the service
+account (for example, mode `0600`). The server refuses to start without a token
+and never accepts credentials in a URL or query string.
+
+The version 1 pull API supports `GET` and `HEAD`:
+
+| Endpoint | Authentication | Result |
+| --- | --- | --- |
+| `/v1/health` | None | Minimal non-cached liveness response |
+| `/v1/manifest/<mode>` | Bearer token | Atomically committed `current.json` |
+| `/v1/frame/<mode>` | Bearer token | EE02 payload referenced by the current manifest |
+| `/v1/frame/<mode>/<sha256>` | Bearer token | Immutable, content-addressed EE02 payload |
+
+Send the token as `Authorization: Bearer <token>`. Missing or incorrect
+credentials receive `401`; an unknown mode or absent committed frame receives
+`404`; and a malformed manifest or missing/corrupt current payload receives
+`503`. The concrete modes are `weather`, `birds`, `star-map`,
+`uploaded-photo`, and `test-pattern`.
+
+Manifest ETags identify the exact JSON representation. Frame ETags identify
+the EE02 SHA-256. Responses also carry the frame checksum and wire-format
+headers. A client can send `If-None-Match` and receives `304 Not Modified` when
+its entity is current. `Cache-Control: no-cache` means caches may retain a
+response but must revalidate it. Clients should fetch the manifest first and
+then request `/v1/frame/<mode>/<sha256>`; the content-addressed URL prevents a
+new render committed between those requests from mixing metadata and bytes.
+
+The built-in server is plain HTTP. A bearer token prevents unauthenticated
+access but does not encrypt the token or frame in transit. Use it only on a
+trusted LAN, restrict the Pi firewall to the ESP32's address, and do not expose
+port 8787 to the public internet. For an untrusted network, bind to
+`127.0.0.1` and put a TLS reverse proxy or a VPN in front of it.
+
+## Simulated ESP client
+
+`esp-sync` exercises the same pull, validation, caching, and refresh decision
+that the firmware should implement. Start with a committed frame and a running
+server, then use a second terminal:
+
+```bash
+export DISPLAY_RUNTIME_AUTH_TOKEN='<the-same-token>'
+python3 -m display_runtime esp-sync weather
+python3 -m display_runtime esp-sync weather --json
+```
+
+Use `--server-url http://<pi-address>:8787` when the simulator is not running
+on the Pi. `--state-dir`, `--timeout`, and `--token-file` override the matching
+configuration or credential source. `esp-sync` requires a concrete mode;
+scheduled `automatic` selection remains a Pi runtime responsibility.
+
+The simulated client stores verified, checksum-named payloads under
+`esp_client.state_directory`, plus atomic `state.json` and `display.ee02`
+files. It revalidates the manifest ETag, verifies the declared format, exact
+960,000-byte length, response headers, and SHA-256 while downloading to a
+temporary file, and only then atomically activates the frame. Switching back
+to a previously verified mode activates its cache without downloading it
+again. A timeout, authentication error, malformed response, truncation, or
+checksum mismatch leaves `display.ee02` and persistent client state unchanged.
+The result's `changed` value tells firmware whether a physical refresh is
+needed. `status` separately reports whether the client received `not-modified`,
+used a verified cache, or downloaded bytes; rebuilding a damaged local cache
+can therefore report `downloaded` while correctly leaving `changed` false.
 
 ## Artifacts and last-known-good behavior
 
@@ -163,15 +251,9 @@ controller transfer codes.
 
 ## Exit codes
 
-- `0`: successful render, including an unchanged frame.
+- `0`: successful command, including an unchanged render or ESP sync.
 - `2`: invalid or unreadable configuration.
 - `3`: missing/rejected source or render failure.
 - `4`: runtime artifact I/O failure.
+- `5`: ESP sync network, authentication, or protocol failure.
 - `1`: unexpected CLI failure.
-
-## Next production layer
-
-The next package layer will publish `current.json` and the `.ee02` file through
-manifest/frame HTTP endpoints and provide systemd units. The ESP32 downloader
-can then validate the declared length and SHA-256 and refresh only when the wire
-checksum changes.

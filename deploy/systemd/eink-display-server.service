@@ -1,0 +1,45 @@
+[Unit]
+Description=E-ink authenticated EE02 frame server
+Documentation=file://@EINK_INSTALL_DIR@/display_runtime/README.md
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsDirectory=@EINK_INSTALL_DIR@
+ConditionPathIsDirectory=@EINK_STATE_DIR@
+ConditionPathExists=@EINK_CONFIG_PATH@
+ConditionPathExists=@EINK_TOKEN_FILE@
+
+[Service]
+Type=simple
+User=@EINK_USER@
+Group=@EINK_GROUP@
+WorkingDirectory=@EINK_INSTALL_DIR@
+Environment=HOME=@EINK_HOME@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@EINK_INSTALL_DIR@/.venv/bin/eink-display --config @EINK_CONFIG_PATH@ serve --token-file @EINK_TOKEN_FILE@
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+
+# The server only reads committed frames. Rendering integrations write through
+# the separate oneshot service, so the service can keep the host read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadOnlyPaths=@EINK_STATE_DIR@
+
+[Install]
+WantedBy=multi-user.target

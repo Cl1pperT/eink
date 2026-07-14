@@ -219,6 +219,9 @@ def _run(args) -> int:
                 f"EE02: {ee02['buffer_dimensions']['width']}x{ee02['buffer_dimensions']['height']} · "
                 f"{ee02['bytes']} bytes · {ee02['landscape_rotation']}"
             )
+            server = result["server"]
+            auth = "configured" if server["authentication_configured"] else "missing"
+            print(f"HTTP: {server['host']}:{server['port']} · authentication {auth}")
             for mode, check in result["modes"].items():
                 marker = "ready" if check["ready"] else "not ready"
                 print(f"{mode}: {marker} — {check['reason']}")
@@ -242,6 +245,8 @@ def _run(args) -> int:
             output_directory=runtime.config.output_directory,
             auth_token=token,
             chunk_size=runtime.config.server_chunk_size,
+            max_connections=runtime.config.server_max_connections,
+            request_timeout=runtime.config.server_request_timeout,
             log_requests=not args.quiet,
         )
         bound_host, bound_port = server.server_address[:2]

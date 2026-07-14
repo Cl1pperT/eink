@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from display_runtime.cli import main
 
@@ -68,6 +69,18 @@ class RuntimeCliTests(unittest.TestCase):
                 code = main(["--config", str(config), "check"])
             self.assertEqual(code, 2)
             self.assertIn("configuration error", stderr.getvalue())
+
+    def test_network_commands_refuse_to_run_without_authentication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "runtime.toml"
+            config.write_text("", encoding="utf-8")
+            for command in (("serve",), ("esp-sync", "weather")):
+                with self.subTest(command=command):
+                    stderr = io.StringIO()
+                    with mock.patch.dict("os.environ", {}, clear=True), redirect_stderr(stderr):
+                        code = main(["--config", str(config), *command])
+                    self.assertEqual(code, 2)
+                    self.assertIn("authentication token is required", stderr.getvalue())
 
 
 if __name__ == "__main__":

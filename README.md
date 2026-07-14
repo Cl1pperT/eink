@@ -7,20 +7,26 @@ uploaded photos, automatic schedules, and test patterns from a terminal or
 service. It validates native dimensions and the six-color palette, writes
 checksum-named immutable PNG and exact 960,000-byte EE02 4bpp frames, and
 atomically maintains a last-known-good manifest for each mode. Persistent
-change detection uses the final hardware payload checksum.
+change detection uses the final hardware payload checksum. An authenticated
+HTTP server publishes only committed artifacts, and the simulated ESP client
+verifies and atomically activates the exact bytes that firmware should pull.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[integrations]'
 python3 -m display_runtime check
 python3 -m display_runtime render test-pattern
+DISPLAY_RUNTIME_AUTH_TOKEN='<a-long-random-token>' \
+  python3 -m display_runtime serve
+DISPLAY_RUNTIME_AUTH_TOKEN='<the-same-token>' \
+  python3 -m display_runtime esp-sync test-pattern
 ```
 
 Production source rendering fails closed by default: live-source failures never
 publish demo content over an existing valid frame. See
 [display_runtime/README.md](display_runtime/README.md) for Raspberry Pi setup,
-TOML configuration, CLI commands, output layout, and current ESP32 integration
-boundary.
+TOML configuration, CLI commands, the authenticated frame API, ETag behavior,
+and the ESP32 pull/verification contract.
 
 ## Desktop Display Simulator
 

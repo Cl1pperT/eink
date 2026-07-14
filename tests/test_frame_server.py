@@ -250,6 +250,24 @@ class FrameServerTests(unittest.TestCase):
                             request(server, path)
                         self.assertIn(caught.exception.code, (400, 404, 503))
 
+    def test_symlinked_frame_directory_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "served"
+            _payload, _checksum, _frame_path = write_committed_frame(output)
+            frames = output / "test-pattern" / "frames"
+            outside = root / "outside-frames"
+            frames.rename(outside)
+            try:
+                frames.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+            with running_server(output) as server:
+                for path in ("/v1/manifest/test-pattern", "/v1/frame/test-pattern"):
+                    with self.subTest(path=path), self.assertRaises(HTTPError) as caught:
+                        request(server, path)
+                    self.assertEqual(caught.exception.code, 503)
+
 
 if __name__ == "__main__":
     unittest.main()

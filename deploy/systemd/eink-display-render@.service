@@ -1,0 +1,48 @@
+[Unit]
+Description=Render the %i e-ink frame
+Documentation=file://@EINK_INSTALL_DIR@/display_runtime/README.md
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsDirectory=@EINK_INSTALL_DIR@
+ConditionPathIsDirectory=@EINK_STATE_DIR@
+ConditionPathExists=@EINK_CONFIG_PATH@
+
+[Service]
+Type=oneshot
+User=@EINK_USER@
+Group=@EINK_GROUP@
+WorkingDirectory=@EINK_INSTALL_DIR@
+Environment=HOME=@EINK_HOME@
+Environment=XDG_CACHE_HOME=@EINK_STATE_DIR@/cache
+Environment=MPLCONFIGDIR=@EINK_STATE_DIR@/cache/matplotlib
+Environment=PLAYWRIGHT_BROWSERS_PATH=@EINK_INSTALL_DIR@/playwright
+Environment=MPLBACKEND=Agg
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Persistent timers can all become due during an outage. A common advisory
+# lock keeps Chromium and the image pipeline from competing for Pi memory when
+# those missed runs are replayed at boot.
+ExecStart=/usr/bin/flock --wait 900 @EINK_STATE_DIR@/.render-scheduler.lock @EINK_INSTALL_DIR@/.venv/bin/eink-display --config @EINK_CONFIG_PATH@ render %i --json
+TimeoutStartSec=30min
+UMask=0077
+
+# Chromium needs user namespaces and executable JIT memory, so this deliberately
+# avoids RestrictNamespaces and MemoryDenyWriteExecute. Its temporary profile is
+# contained by PrivateTmp; caches and atomic frames live below EINK_STATE_DIR.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=@EINK_STATE_DIR@

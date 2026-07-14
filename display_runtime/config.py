@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 from typing import Any, Mapping
@@ -37,8 +37,10 @@ class RuntimeConfig:
     write_rgb: bool
     server_host: str
     server_port: int
-    server_auth_token: str
+    server_auth_token: str = field(repr=False)
     server_chunk_size: int
+    server_max_connections: int
+    server_request_timeout: float
     esp_server_url: str
     esp_state_directory: Path
     esp_timeout: float
@@ -265,6 +267,16 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
     server_chunk_size = _integer(server["chunk_size"], "server.chunk_size")
     if server_chunk_size <= 0:
         raise ConfigError("server.chunk_size must be greater than zero")
+    server_max_connections = _integer(
+        server["max_connections"], "server.max_connections"
+    )
+    if server_max_connections <= 0:
+        raise ConfigError("server.max_connections must be greater than zero")
+    server_request_timeout = _number(
+        server["request_timeout"], "server.request_timeout"
+    )
+    if server_request_timeout <= 0:
+        raise ConfigError("server.request_timeout must be greater than zero")
     esp_chunk_size = _integer(esp_client["chunk_size"], "esp_client.chunk_size")
     if esp_chunk_size <= 0:
         raise ConfigError("esp_client.chunk_size must be greater than zero")
@@ -299,6 +311,8 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
         server_port=server_port,
         server_auth_token=auth_token,
         server_chunk_size=server_chunk_size,
+        server_max_connections=server_max_connections,
+        server_request_timeout=server_request_timeout,
         esp_server_url=_string(esp_client["server_url"], "esp_client.server_url", allow_empty=False),
         esp_state_directory=esp_state_directory,
         esp_timeout=esp_timeout,

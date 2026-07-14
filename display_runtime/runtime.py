@@ -618,5 +618,16 @@ class FrameRuntime:
                 "landscape_rotation": self.config.landscape_rotation.value,
                 "seeed_sprite_rotation": self.config.landscape_rotation.seeed_sprite_rotation,
             },
+            "server": {
+                "host": self.config.server_host,
+                "port": self.config.server_port,
+                "authentication_configured": bool(self.config.server_auth_token),
+                "max_connections": self.config.server_max_connections,
+                "request_timeout": self.config.server_request_timeout,
+            },
+            "esp_client": {
+                "server_url": self.config.esp_server_url,
+                "state_directory": str(self.config.esp_state_directory),
+            },
             "modes": readiness,
         }
