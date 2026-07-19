@@ -1,0 +1,50 @@
+# macOS and editor metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Python bytecode, environments, and package outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
+
+# Test, type-checker, and coverage caches
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+/runtime.toml
+*.local.toml
+firmware/**/include/secrets.h
+
+# Generated display/runtime state
+/playwright/
+/simulator_output/
+/runtime_output/
+/esp_simulator/
+/duckdb-extensions/
+*.tmp
+*.log
+
+# Co-located integration checkouts are separate, nested Git repositories.
+# Add them as deliberate submodules before tracking them in this repository.
+/peacock/
+/stars/

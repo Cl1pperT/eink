@@ -15,7 +15,8 @@ from .config import DEFAULTS, load_config
 from .controller import RenderController
 from .models import ConversionSettings, FitMode, Orientation, RenderContext, RenderResult
 from .pipeline import normalize_source, unsupported_colors
-from .preferences import load_preferences, save_preferences
+from .preferences import load_preferences, repository_preference_value, save_preferences
+from .repositories import find_avian_repository, find_repository
 from .schedule import ScheduleConfig, mode_for_time, parse_clock
 from .sources import BirdsSource, StarMapSource, TestPatternSource, UploadedPhotoSource, WeatherSource
 from .upload_server import UploadServer
@@ -55,12 +56,24 @@ class SimulatorApp:
         saved_repositories = preferences.get("repositories", {}) if isinstance(preferences.get("repositories"), dict) else {}
         saved_sources = preferences.get("sources", {}) if isinstance(preferences.get("sources"), dict) else {}
         repositories = c["repositories"]
+        saved_avian = str(saved_repositories.get("avian_weather") or "")
+        saved_starmap = str(saved_repositories.get("inkystarmap") or "")
         shared_repo = str(
-            saved_repositories.get("avian_weather")
+            saved_avian
             or repositories.get("avian_weather")
             or repositories.get("weather")
             or repositories.get("avian")
             or ""
+        )
+        avian_checkout = find_avian_repository(shared_repo)
+        starmap_value = str(
+            saved_starmap
+            or repositories["inkystarmap"]
+        )
+        starmap_checkout = find_repository(
+            starmap_value,
+            "src/inkystarmap/inkystarmap.py",
+            "INKYSTARMAP_REPO",
         )
         self.mode = tk.StringVar(value="Automatic")
         self.orientation = tk.StringVar(value=c["display"]["orientation"])
@@ -71,8 +84,17 @@ class SimulatorApp:
         self.auto_render = tk.BooleanVar(value=False)
         self.active_schedule = tk.StringVar()
         self.location = tk.StringVar(value=str(preferences.get("location") or c["location"]["name"]))
-        self.avian_weather_repo = tk.StringVar(value=shared_repo)
-        self.inkystarmap_repo = tk.StringVar(value=str(saved_repositories.get("inkystarmap") or repositories["inkystarmap"]))
+        self.avian_weather_repo = tk.StringVar(value=str(avian_checkout or shared_repo))
+        self.inkystarmap_repo = tk.StringVar(value=str(starmap_checkout or starmap_value))
+        self._repository_display_defaults = {
+            "avian_weather": self.avian_weather_repo.get().strip(),
+            "inkystarmap": self.inkystarmap_repo.get().strip(),
+        }
+        self._saved_repository_preferences = {
+            "avian_weather": saved_avian,
+            "inkystarmap": saved_starmap,
+        }
+        self._explicit_repository_selections: set[str] = set()
         self.latitude = tk.DoubleVar(value=c["coordinates"]["latitude"])
         self.longitude = tk.DoubleVar(value=c["coordinates"]["longitude"])
         self.direction = tk.IntVar(value=c["coordinates"]["direction"])
@@ -372,6 +394,8 @@ class SimulatorApp:
         path = filedialog.askdirectory(title="Choose repository checkout")
         if path:
             variable.set(path)
+            key = "avian_weather" if variable is self.avian_weather_repo else "inkystarmap"
+            self._explicit_repository_selections.add(key)
             self._save_preferences()
 
     def _choose_bird(self) -> None: self._choose_path(self.bird_source, "Choose bird frame")
@@ -429,8 +453,23 @@ class SimulatorApp:
     def _reset_defaults(self) -> None:
         c = DEFAULTS
         self.orientation.set(c["display"]["orientation"]); self.location.set(c["location"]["name"])
-        self.avian_weather_repo.set(c["repositories"]["avian_weather"])
-        self.inkystarmap_repo.set(c["repositories"]["inkystarmap"])
+        avian = find_avian_repository(str(c["repositories"]["avian_weather"]))
+        starmap = find_repository(
+            str(c["repositories"]["inkystarmap"]),
+            "src/inkystarmap/inkystarmap.py",
+            "INKYSTARMAP_REPO",
+        )
+        self.avian_weather_repo.set(str(avian or c["repositories"]["avian_weather"]))
+        self.inkystarmap_repo.set(str(starmap or c["repositories"]["inkystarmap"]))
+        self._repository_display_defaults = {
+            "avian_weather": self.avian_weather_repo.get().strip(),
+            "inkystarmap": self.inkystarmap_repo.get().strip(),
+        }
+        self._saved_repository_preferences = {
+            "avian_weather": "",
+            "inkystarmap": "",
+        }
+        self._explicit_repository_selections.clear()
         self.latitude.set(c["coordinates"]["latitude"]); self.longitude.set(c["coordinates"]["longitude"])
         self.direction.set(c["coordinates"]["direction"]); self.timezone.set(c["coordinates"]["timezone"])
         self.bird_source.set(c["sources"]["bird"]); self.starmap_source.set(c["sources"]["starmap"])
@@ -445,8 +484,16 @@ class SimulatorApp:
         data = {
             "location": self.location.get().strip(),
             "repositories": {
-                "avian_weather": self.avian_weather_repo.get().strip(),
-                "inkystarmap": self.inkystarmap_repo.get().strip(),
+                key: repository_preference_value(
+                    variable.get(),
+                    self._repository_display_defaults[key],
+                    self._saved_repository_preferences[key],
+                    explicitly_selected=key in self._explicit_repository_selections,
+                )
+                for key, variable in (
+                    ("avian_weather", self.avian_weather_repo),
+                    ("inkystarmap", self.inkystarmap_repo),
+                )
             },
             "sources": {
                 "bird": self.bird_source.get().strip(),
@@ -457,6 +504,7 @@ class SimulatorApp:
         try:
             save_preferences(data)
             self.user_preferences = data
+            self._saved_repository_preferences = dict(data["repositories"])
         except OSError as exc:
             if hasattr(self, "status"):
                 self.status.set(f"Could not save preferences: {exc}")

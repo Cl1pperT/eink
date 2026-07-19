@@ -58,6 +58,19 @@ adds Python requirements beyond this package's `integrations` extra, install
 them into `/opt/eink-display/.venv` and rerun `eink-display check` as the
 service account.
 
+Running the CLI directly from the full development checkout is more convenient:
+blank repository fields automatically discover `peacock/AvianVisitors` and
+`stars/integrations/inkystarmap` relative to the source tree. Explicit TOML
+paths override discovery; when a field is blank, `WEATHER_FRAME_REPO`,
+`AVIANVISITORS_REPO`, or `INKYSTARMAP_REPO` can override the matching source.
+For strict runtime checks, a nonempty environment override is authoritative and
+must point directly to a checkout containing the expected marker; an invalid
+value fails instead of silently selecting another checkout.
+The root repository locally ignores `peacock/` and `stars/`, and the Pi
+installer packages neither directory. Do not depend on development discovery
+for the installed systemd service: maintain its checkouts separately and keep
+their readable absolute paths in `/etc/eink-display/runtime.toml`.
+
 `sources.bird` must be the actual AvianVisitors collage page—the page containing
 the `.gtile` bird tiles—not merely the stock BirdNET-Pi dashboard. If the
 BirdNET host only serves its standard dashboard, host/install the AvianVisitors
@@ -285,12 +298,21 @@ configuration are resolved from that configuration file's directory. Unknown
 keys, invalid coordinates, timezones, schedule ordering, and conversion values
 are rejected instead of silently ignored.
 
+In a full source checkout, leaving repository fields blank enables automatic
+discovery of `peacock/AvianVisitors` and
+`stars/integrations/inkystarmap`. Explicit configuration and matching
+repository environment variables remain overrides. An installed wheel does not
+contain those ignored local checkouts, so production configuration should use
+absolute repository paths.
+
 `runtime.strict_sources = true` is the production default:
 
-- Weather requires the configured AvianVisitors checkout and real provider.
-- A bird URL requires the configured AvianVisitors checkout and never falls
+- Weather requires a configured or discovered AvianVisitors checkout and real
+  provider.
+- A bird URL requires a configured or discovered AvianVisitors checkout and never falls
   back to fixture species after a capture failure.
-- A live star map requires the configured inkystarmap checkout and Starplot.
+- A live star map requires a configured or discovered inkystarmap checkout and
+  Starplot.
 - Explicit bird, star-map, and uploaded-photo files are allowed and recorded
   with `file` provenance.
 - Test pattern is always an explicit manual mode and is never scheduled.

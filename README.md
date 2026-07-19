@@ -51,6 +51,15 @@ collage, the morning weather renderer from
 hosts an optional LAN photo-upload page. Every source passes through the weather
 fork's EL133UF1-compatible Spectra 6 conversion pipeline.
 
+When those projects are checked out at `peacock/AvianVisitors` and
+`stars/integrations/inkystarmap`, the simulator and checkout-based headless CLI
+discover them relative to this source tree. No repository selection in the UI
+is required. A valid remembered UI/configuration path takes precedence; when it
+is blank or stale, the corresponding repository environment variables override
+co-located discovery. The two copied trees are locally ignored by this
+repository, so they retain their own Git histories and are not included in
+parent-repository commits or clones.
+
 ```bash
 python3 -m pip install -r requirements-simulator.txt
 python3 -m display_simulator
@@ -59,3 +68,8 @@ python3 -m display_simulator
 It generates 1600×1200 landscape or 1200×1600 portrait frames and never updates
 physical hardware. See [display_simulator/README.md](display_simulator/README.md)
 for setup, controls, offline mode, integrations, and limitations.
+
+This source-tree discovery is a development convenience. The Raspberry Pi
+installer does not copy these locally ignored checkouts; an installed service
+continues to use separately managed repositories at readable absolute paths in
+`/etc/eink-display/runtime.toml`.

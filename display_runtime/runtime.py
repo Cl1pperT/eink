@@ -20,6 +20,7 @@ from PIL import Image
 
 from display_simulator.models import RenderContext
 from display_simulator.pipeline import ImagePipeline, SPECTRA_PALETTE, checksum_image, validate_palette
+from display_simulator.repositories import find_repository
 from display_simulator.schedule import mode_for_time
 from display_simulator.sources import (
     BirdsSource,
@@ -293,9 +294,23 @@ class FrameRuntime:
             return requested
         return canonical_mode(mode_for_time(when, self.config.schedule))
 
-    def _repository(self, path: Path | None, marker: str, label: str) -> Path:
+    def _repository(
+        self,
+        path: Path | None,
+        marker: str,
+        label: str,
+        env_name: str,
+    ) -> Path:
         if path is None:
-            raise SourcePolicyError(f"{label} repository path is not configured")
+            environment_value = os.environ.get(env_name, "").strip()
+            if environment_value:
+                path = Path(environment_value).expanduser().resolve(strict=False)
+            else:
+                path = find_repository("", marker, env_name)
+        if path is None:
+            raise SourcePolicyError(
+                f"{label} repository path is not configured and no co-located checkout was found"
+            )
         if not (path / marker).exists():
             raise SourcePolicyError(f"{label} repository is invalid; expected {path / marker}")
         return path
@@ -308,7 +323,12 @@ class FrameRuntime:
             if strict and cfg.weather_offline:
                 raise SourcePolicyError("fixture weather is disabled for production renders")
             if strict:
-                self._repository(cfg.avian_weather_repo, "weather_frame/renderer.py", "AvianVisitors/weather")
+                self._repository(
+                    cfg.avian_weather_repo,
+                    "weather_frame/renderer.py",
+                    "AvianVisitors/weather",
+                    "WEATHER_FRAME_REPO",
+                )
             return
         if mode == "birds":
             if strict and (cfg.bird_demo or not cfg.bird_source):
@@ -317,7 +337,12 @@ class FrameRuntime:
                 if not Path(cfg.bird_source).is_file():
                     raise FileNotFoundError(f"bird frame not found: {cfg.bird_source}")
             elif strict:
-                self._repository(cfg.avian_weather_repo, "frame/shoot.py", "AvianVisitors")
+                self._repository(
+                    cfg.avian_weather_repo,
+                    "frame/shoot.py",
+                    "AvianVisitors",
+                    "AVIANVISITORS_REPO",
+                )
             if strict and cfg.avian_python is not None and not cfg.avian_python.is_file():
                 raise SourcePolicyError(f"sources.avian_python does not exist: {cfg.avian_python}")
             return
@@ -327,7 +352,12 @@ class FrameRuntime:
                     raise FileNotFoundError(f"star-map image not found: {cfg.starmap_source}")
                 return
             if strict:
-                self._repository(cfg.inkystarmap_repo, "src/inkystarmap/inkystarmap.py", "inkystarmap")
+                self._repository(
+                    cfg.inkystarmap_repo,
+                    "src/inkystarmap/inkystarmap.py",
+                    "inkystarmap",
+                    "INKYSTARMAP_REPO",
+                )
                 if not cfg.use_inkystarmap:
                     raise SourcePolicyError("sources.use_inkystarmap must be true for production star maps")
                 if importlib.util.find_spec("starplot") is None:

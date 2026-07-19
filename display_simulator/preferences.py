@@ -7,6 +7,20 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+def repository_preference_value(
+    current: str,
+    discovered_display: str,
+    saved: str,
+    *,
+    explicitly_selected: bool = False,
+) -> str:
+    """Avoid turning an untouched discovered path into a saved override."""
+    current = current.strip()
+    if explicitly_selected or current != discovered_display.strip():
+        return current
+    return saved.strip()
+
+
 def preferences_path() -> Path:
     override = os.environ.get("DISPLAY_SIMULATOR_PREFERENCES", "").strip()
     if override:

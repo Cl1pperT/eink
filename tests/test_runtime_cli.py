@@ -54,7 +54,10 @@ class RuntimeCliTests(unittest.TestCase):
             config = Path(directory) / "runtime.toml"
             config.write_text("", encoding="utf-8")
             stderr = io.StringIO()
-            with redirect_stderr(stderr):
+            with (
+                mock.patch("display_runtime.runtime.find_repository", return_value=None),
+                redirect_stderr(stderr),
+            ):
                 code = main(["--config", str(config), "render", "weather"])
             self.assertEqual(code, 3)
             self.assertIn("repository path is not configured", stderr.getvalue())

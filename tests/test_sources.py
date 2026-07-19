@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime
 import os
 from pathlib import Path
@@ -11,16 +12,44 @@ from display_simulator.sources import BirdsSource, StarMapSource, TestPatternSou
 from display_simulator.avian_capture import DEMO_SPECIES
 
 
+@contextmanager
+def without_external_repositories():
+    with tempfile.TemporaryDirectory() as directory:
+        empty_root = Path(directory)
+        with (
+            patch("display_simulator.repositories.PROJECT_ROOT", empty_root),
+            patch(
+                "display_simulator.repositories.Path.cwd",
+                return_value=empty_root / "cwd",
+            ),
+            patch(
+                "display_simulator.repositories.Path.home",
+                return_value=empty_root / "home",
+            ),
+            patch.dict(
+                os.environ,
+                {
+                    "AVIANVISITORS_REPO": "",
+                    "WEATHER_FRAME_REPO": "",
+                    "INKYSTARMAP_REPO": "",
+                },
+                clear=False,
+            ),
+        ):
+            yield
+
+
 class SourceTests(unittest.TestCase):
     def setUp(self):
         self.context = RenderContext(Orientation.LANDSCAPE, datetime(2026, 7, 10, 8), "Denver", offline=True)
 
     def test_offline_fallback_sources_return_rgb(self):
-        for source in (WeatherSource(), BirdsSource(), StarMapSource()):
-            with self.subTest(source=source.name):
-                image = source.render(self.context)
-                self.assertEqual(image.mode, "RGB")
-                self.assertEqual(image.size, (1600, 1200))
+        with without_external_repositories():
+            for source in (WeatherSource(), BirdsSource(), StarMapSource()):
+                with self.subTest(source=source.name):
+                    image = source.render(self.context)
+                    self.assertEqual(image.mode, "RGB")
+                    self.assertEqual(image.size, (1600, 1200))
 
     def test_test_pattern_generation(self):
         image = TestPatternSource().render(self.context)
@@ -160,10 +189,12 @@ class SourceTests(unittest.TestCase):
             datetime(2026, 7, 10, 22),
             options={"allow_demo_fallback": False, "inkystarmap_repo": ""},
         )
-        with self.assertRaisesRegex(RuntimeError, "explicit inkystarmap checkout"):
-            StarMapSource().render(context)
+        with without_external_repositories():
+            with self.assertRaisesRegex(RuntimeError, "explicit inkystarmap checkout"):
+                StarMapSource().render(context)
 
     def test_live_weather_missing_integration_is_clear(self):
         context = RenderContext(offline=False)
-        with self.assertRaisesRegex(RuntimeError, "weather_frame checkout not found"):
-            WeatherSource().render(context)
+        with without_external_repositories():
+            with self.assertRaisesRegex(RuntimeError, "weather_frame checkout not found"):
+                WeatherSource().render(context)

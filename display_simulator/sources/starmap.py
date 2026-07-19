@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw
 
 from ..models import RenderContext
-from ..repositories import find_repository
+from ..repositories import PROJECT_ROOT, find_repository
 from .drawing import font
 
 # Star maps are rendered to PNG inside the simulator's worker thread. On macOS,
@@ -18,6 +18,18 @@ from .drawing import font
 # that worker, which can segfault the entire simulator. Select the non-GUI
 # raster backend before Starplot (and therefore Matplotlib) is imported.
 os.environ["MPLBACKEND"] = "Agg"
+
+# The development checkout includes Starplot's large immutable catalogs. Point
+# Starplot at them before it is imported so a launch from another directory
+# neither misses those files nor downloads duplicate copies there. An explicit
+# STARPLOT_DATA_PATH remains authoritative.
+_STARPLOT_DATA_FILES = (
+    "constellations.0.3.3.parquet",
+    "de421.bsp",
+    "stars.bigksy.0.1.3.mag11.parquet",
+)
+if all((PROJECT_ROOT / name).is_file() for name in _STARPLOT_DATA_FILES):
+    os.environ.setdefault("STARPLOT_DATA_PATH", str(PROJECT_ROOT))
 
 
 class StarMapSource:

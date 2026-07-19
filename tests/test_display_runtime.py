@@ -46,6 +46,23 @@ def config_for(directory: Path, **updates):
     )
 
 
+def create_colocated_repositories(project_root: Path) -> None:
+    markers = (
+        project_root / "peacock" / "AvianVisitors" / "weather_frame" / "renderer.py",
+        project_root / "peacock" / "AvianVisitors" / "frame" / "shoot.py",
+        project_root
+        / "stars"
+        / "integrations"
+        / "inkystarmap"
+        / "src"
+        / "inkystarmap"
+        / "inkystarmap.py",
+    )
+    for marker in markers:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("# test marker\n", encoding="utf-8")
+
+
 class RuntimeConfigTests(unittest.TestCase):
     def test_relative_paths_resolve_from_config_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -89,6 +106,103 @@ class RuntimeConfigTests(unittest.TestCase):
 class FrameRuntimeTests(unittest.TestCase):
     def test_import_is_headless(self):
         self.assertNotIn("tkinter", sys.modules)
+
+    def test_check_auto_discovers_colocated_repositories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_root = root / "project"
+            create_colocated_repositories(project_root)
+            config = config_for(root)
+
+            with (
+                patch("display_simulator.repositories.PROJECT_ROOT", project_root),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "AVIANVISITORS_REPO": "",
+                        "WEATHER_FRAME_REPO": "",
+                        "INKYSTARMAP_REPO": "",
+                    },
+                ),
+                patch("display_runtime.runtime.importlib.util.find_spec", return_value=object()),
+            ):
+                modes = FrameRuntime(config).check()["modes"]
+
+            for mode in ("weather", "birds", "star-map"):
+                with self.subTest(mode=mode):
+                    self.assertEqual(modes[mode], {"ready": True, "reason": "ready"})
+
+    def test_check_does_not_replace_invalid_explicit_repositories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_root = root / "project"
+            create_colocated_repositories(project_root)
+            invalid_avian = root / "invalid-avian"
+            invalid_stars = root / "invalid-stars"
+            config = config_for(
+                root,
+                avian_weather_repo=invalid_avian,
+                inkystarmap_repo=invalid_stars,
+            )
+
+            with (
+                patch("display_simulator.repositories.PROJECT_ROOT", project_root),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "AVIANVISITORS_REPO": "",
+                        "WEATHER_FRAME_REPO": "",
+                        "INKYSTARMAP_REPO": "",
+                    },
+                ),
+                patch("display_runtime.runtime.importlib.util.find_spec", return_value=object()),
+            ):
+                modes = FrameRuntime(config).check()["modes"]
+
+            expected_markers = {
+                "weather": invalid_avian / "weather_frame" / "renderer.py",
+                "birds": invalid_avian / "frame" / "shoot.py",
+                "star-map": invalid_stars / "src" / "inkystarmap" / "inkystarmap.py",
+            }
+            for mode, marker in expected_markers.items():
+                with self.subTest(mode=mode):
+                    self.assertFalse(modes[mode]["ready"])
+                    self.assertIn("repository is invalid", modes[mode]["reason"])
+                    self.assertIn(str(marker), modes[mode]["reason"])
+
+    def test_check_does_not_replace_invalid_environment_repositories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_root = root / "project"
+            create_colocated_repositories(project_root)
+            invalid_avian = root / "invalid-avian"
+            invalid_stars = root / "invalid-stars"
+            config = config_for(root)
+
+            with (
+                patch("display_simulator.repositories.PROJECT_ROOT", project_root),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "AVIANVISITORS_REPO": str(invalid_avian),
+                        "WEATHER_FRAME_REPO": str(invalid_avian),
+                        "INKYSTARMAP_REPO": str(invalid_stars),
+                    },
+                ),
+                patch("display_runtime.runtime.importlib.util.find_spec", return_value=object()),
+            ):
+                modes = FrameRuntime(config).check()["modes"]
+
+            expected_markers = {
+                "weather": invalid_avian / "weather_frame" / "renderer.py",
+                "birds": invalid_avian / "frame" / "shoot.py",
+                "star-map": invalid_stars / "src" / "inkystarmap" / "inkystarmap.py",
+            }
+            for mode, marker in expected_markers.items():
+                with self.subTest(mode=mode):
+                    self.assertFalse(modes[mode]["ready"])
+                    self.assertIn("repository is invalid", modes[mode]["reason"])
+                    self.assertIn(str(marker), modes[mode]["reason"])
 
     def test_atomic_commit_and_persistent_unchanged_detection(self):
         with tempfile.TemporaryDirectory() as directory:

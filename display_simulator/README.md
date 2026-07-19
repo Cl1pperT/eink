@@ -41,26 +41,53 @@ a traceback. Install a Python distribution that includes Tk and retry.
 - `widgets/` and `app.py` implement the responsive Tk interface.
 - `defaults.toml` contains launch defaults. A user config is optional.
 
-The repository paths are intentionally configurable rather than vendored. This
-avoids duplicating hundreds of bird illustrations, weather scenes, or
-inkystarmap and lets each project update independently.
+The integrations remain independent checkouts rather than package data. Their
+paths are automatically discovered in this source tree, while explicit paths
+remain configurable for alternate layouts.
 
-## Connect the real projects
+## Automatic checkout discovery and overrides
 
-Clone the projects wherever you keep source checkouts:
+The simulator automatically discovers the copied repositories at:
+
+```text
+peacock/AvianVisitors
+stars/integrations/inkystarmap
+```
+
+Discovery is anchored to the E-Ink Frame source directory, so it does not
+depend on the shell or IDE launch directory. If either checkout is absent, it
+can be populated with:
 
 ```bash
-git clone --branch avian-visitors https://github.com/Cl1pperT/AvianVisitors.git AvianVisitors-weather
-git clone https://github.com/Marcel-Jan/inkystarmap.git
+git clone --branch avian-visitors https://github.com/Cl1pperT/AvianVisitors.git peacock/AvianVisitors
+git clone https://github.com/Marcel-Jan/inkystarmap.git stars/integrations/inkystarmap
 ```
 
 Because the weather fork contains `avian/`, `frame/`, and `weather_frame/`, the
 simulator uses one **AvianVisitors + Weather** repository selector for both the
 morning and daytime modes (including the Twarner491 bird-viewer code it is based
-on). Choose the Cl1pperT checkout there, then choose the
-separate inkystarmap checkout. Paths can alternatively be provided through
-`AVIANVISITORS_REPO`/`WEATHER_FRAME_REPO` and `INKYSTARMAP_REPO` environment
-variables.
+on). The discovered paths appear in the repository controls; selecting folders
+there is optional.
+
+A valid remembered UI path or configured repository path takes precedence over
+the co-located checkout. The desktop's shared Peacock resolver requires both
+`weather_frame/renderer.py` and `frame/shoot.py`; when no valid saved path
+exists, it checks `WEATHER_FRAME_REPO` and then `AVIANVISITORS_REPO` as aliases
+for that shared checkout. Stars similarly uses `INKYSTARMAP_REPO`. A selector
+may point directly to a checkout or to a supported parent collection such as
+`stars/`.
+
+The root `.gitignore` excludes `peacock/` and `stars/`. These are local working
+copies with their own Git histories, not content committed or distributed by
+the E-Ink Frame repository. A fresh parent checkout therefore needs the two
+integration repositories cloned into the paths above (or supplied through an
+override).
+
+The Raspberry Pi installer deliberately does not copy these local trees. Its
+system service uses separately managed AvianVisitors and inkystarmap checkouts
+at the absolute paths configured in `/etc/eink-display/runtime.toml`; see the
+[headless runtime documentation](../display_runtime/README.md) for that
+deployment layout.
 
 For live bird-page capture and Starplot rendering, install the optional desktop
 dependencies:
@@ -106,14 +133,14 @@ wake reason, and whether identical pixel data would justify a panel refresh.
 
 ## Weather, birds, and stars
 
-With the weather checkout configured, fixture weather constructs a deterministic
-`DailyForecast` and sends it through the real renderer and its local generated
-scene/procedural fallback. Turning fixture weather off uses that project's
-Open-Meteo provider. Without the checkout, fixture mode uses the small built-in
-Pillow fallback and live mode reports a clear error.
+With the weather checkout discovered or configured, fixture weather constructs
+a deterministic `DailyForecast` and sends it through the real renderer and its
+local generated scene/procedural fallback. Turning fixture weather off uses
+that project's Open-Meteo provider. Without the checkout, fixture mode uses the
+small built-in Pillow fallback and live mode reports a clear error.
 
 Bird mode accepts either a completed PNG or an AvianVisitors page URL. When its
-checkout is configured, URL capture invokes the project's actual
+checkout is discovered or configured, URL capture invokes the project's actual
 `frame/shoot.py` with a native-aspect viewport. Landscape capture restores the
 frontend's wide packing bias and uses a denser bird-area budget so the collage
 fills the 4:3 panel; portrait capture keeps the upstream frame defaults. Demo Birds uses illustrations
@@ -137,8 +164,8 @@ chart. A repository selector may point either directly at inkystarmap or at a
 parent such as `stars/` containing `integrations/inkystarmap`; the nested
 checkout is detected automatically. When the checkout exists but Starplot is
 missing, its checked-in sample image is shown with an explicit diagnostic. All
-slow paths run in the rendering worker. Starplot downloads its astronomy
-catalogs on the first live render and caches them for subsequent frames.
+slow paths run in the rendering worker. A source checkout uses the astronomy
+catalogs stored at the repository root even when launched elsewhere.
 
 ## LAN photo uploads
 
@@ -163,16 +190,19 @@ simulator intentionally stops before any hardware update.
 
 ## Configuration
 
-Project defaults live in `display_simulator/defaults.toml`: repository paths,
+Project defaults live in `display_simulator/defaults.toml`: repository overrides,
 coordinates, upload listener, orientation, location, schedule boundaries,
 output directory, conversion settings, source paths, physical preview, button
 mappings, and window size. The application launches without a user
 configuration. `load_config(path)` can merge an optional TOML file over the
-project defaults.
+project defaults. Blank repository overrides allow the source-tree discovery
+described above; **Reset Defaults** runs that discovery again.
 
-The last weather location, shared AvianVisitors/weather checkout, inkystarmap
-checkout, bird URL or PNG, star-map PNG, and uploaded-photo path are remembered
-automatically. On macOS they are stored in:
+The last weather location, explicitly selected or typed repository overrides,
+bird URL or PNG, star-map PNG, and uploaded-photo path are remembered
+automatically. Untouched auto-discovered repository paths remain discovery
+results rather than becoming saved overrides, so a later environment override
+still takes effect. On macOS preferences are stored in:
 
 ```text
 ~/Library/Application Support/EInk Display Simulator/preferences.json
