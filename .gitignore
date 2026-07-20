@@ -4,6 +4,7 @@
 .vscode/
 *.swp
 *~
+*.pyc
 
 # Python bytecode, environments, and package outputs
 __pycache__/
