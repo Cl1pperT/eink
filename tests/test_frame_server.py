@@ -78,12 +78,12 @@ def write_committed_frame(
 
 
 @contextmanager
-def running_server(output_directory: Path):
+def running_server(output_directory: Path, *, auth_token: str = TOKEN):
     try:
         server = FrameServer(
             ("127.0.0.1", 0),
             output_directory=output_directory,
-            auth_token=TOKEN,
+            auth_token=auth_token,
             chunk_size=4096,
             log_requests=False,
         )
@@ -125,6 +125,16 @@ def request(
 
 
 class FrameServerTests(unittest.TestCase):
+    def test_empty_token_allows_read_only_lan_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            write_committed_frame(output)
+            with running_server(output, auth_token="") as server:
+                with request(
+                    server, "/v1/frame/test-pattern", token=None
+                ) as response:
+                    self.assertEqual(response.status, 200)
+
     def test_bearer_authentication_is_required(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

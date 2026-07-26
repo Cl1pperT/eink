@@ -5,6 +5,10 @@
 [runtime]
 strict_sources = true
 
+[control]
+# Written atomically by the phone-friendly LAN control panel.
+settings = "/var/lib/eink-display/control/settings.json"
+
 [display]
 orientation = "landscape"
 fit_mode = "crop"
@@ -65,9 +69,8 @@ directory = "/var/lib/eink-display/frames"
 write_rgb = true
 
 [server]
-# Bind to the Pi's LAN interfaces. Set DISPLAY_RUNTIME_AUTH_TOKEN in the
-# shell for manual use. The installed systemd service instead reads the
-# root/service-group token file; do not put a production token in this TOML.
+# Bind to the Pi's LAN interfaces. Leave auth_token empty for read-only LAN
+# access, or set DISPLAY_RUNTIME_AUTH_TOKEN when authentication is desired.
 host = "0.0.0.0"
 port = 8787
 auth_token = ""

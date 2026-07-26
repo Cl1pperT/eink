@@ -30,12 +30,14 @@ PURGE=false
 DRY_RUN=false
 
 readonly SERVER_UNIT="eink-display-server.service"
+readonly CONTROL_UNIT="eink-display-control.service"
 readonly RENDER_UNIT="eink-display-render@.service"
 readonly WEATHER_TIMER="eink-display-weather.timer"
 readonly BIRDS_TIMER="eink-display-birds.timer"
 readonly STAR_TIMER="eink-display-star-map.timer"
 readonly -a MANAGED_UNITS=(
     "$SERVER_UNIT"
+    "$CONTROL_UNIT"
     "$RENDER_UNIT"
     "$WEATHER_TIMER"
     "$BIRDS_TIMER"
@@ -43,6 +45,7 @@ readonly -a MANAGED_UNITS=(
 )
 readonly -a ENABLED_UNITS=(
     "$SERVER_UNIT"
+    "$CONTROL_UNIT"
     "$WEATHER_TIMER"
     "$BIRDS_TIMER"
     "$STAR_TIMER"
@@ -67,7 +70,7 @@ Options:
   --no-enable             Install units without enabling or starting them
   --no-start              Enable units but do not start/restart them
   --force-config          Back up and replace an existing runtime.toml
-  --rotate-token          Replace the bearer token (ESP clients must be updated)
+  --rotate-token          Replace frame and phone tokens (ESP clients must be updated)
   --allow-unsupported     Permit non-Pi/non-aarch64 live installation
   --destdir DIR           Rootless staged filesystem install; skips apt/pip/systemd
   --uninstall             Remove application and units; preserve config/state
@@ -75,7 +78,7 @@ Options:
   --dry-run               Validate and describe the operation without writing
   -h, --help              Show this help
 
-Rerunning the installer is safe: operator configuration, bearer token, frame
+Rerunning the installer is safe: operator configuration, access tokens, frame
 state, and external repositories are preserved unless an explicit replacement
 flag is supplied.
 EOF
@@ -209,15 +212,17 @@ STATE_FS="$(fs_path "$STATE_DIR")"
 UNIT_FS="$(fs_path /etc/systemd/system)"
 CONFIG_PATH="$CONFIG_DIR/runtime.toml"
 TOKEN_FILE="$CONFIG_DIR/frame-server.token"
+CONTROL_TOKEN_FILE="$CONFIG_DIR/control-panel.token"
 CONFIG_PATH_FS="$(fs_path "$CONFIG_PATH")"
 TOKEN_FILE_FS="$(fs_path "$TOKEN_FILE")"
+CONTROL_TOKEN_FILE_FS="$(fs_path "$CONTROL_TOKEN_FILE")"
 
 if "$DRY_RUN"; then
     action="install"
     "$UNINSTALL" && action="uninstall"
     log "dry run: would $action runtime at $INSTALL_DIR"
     log "dry run: config=$CONFIG_PATH state=$STATE_DIR user=$SERVICE_USER:$SERVICE_GROUP"
-    "$ROTATE_TOKEN" && log "dry run: would rotate the bearer token without printing it"
+    "$ROTATE_TOKEN" && log "dry run: would rotate the access tokens without printing them"
     exit 0
 fi
 
@@ -314,17 +319,18 @@ reject_symlink "$CONFIG_FS" "configuration directory"
 reject_symlink "$STATE_FS" "state directory"
 install -d -m 0755 "$INSTALL_FS" "$UNIT_FS"
 install -d -m 0750 "$CONFIG_FS" "$STATE_FS"
-for managed_state_path in cache cache/matplotlib frames uploads; do
+for managed_state_path in cache cache/matplotlib frames uploads control; do
     reject_symlink "$STATE_FS/$managed_state_path" \
         "managed state path $managed_state_path"
 done
 install -d -m 0750 "$STATE_FS/cache" "$STATE_FS/cache/matplotlib" \
-    "$STATE_FS/frames" "$STATE_FS/uploads"
+    "$STATE_FS/frames" "$STATE_FS/uploads" "$STATE_FS/control"
 if [[ -z "$DESTDIR" ]]; then
     chown root:root "$INSTALL_FS"
     chown root:"$SERVICE_GROUP" "$CONFIG_FS"
     chown "$SERVICE_USER":"$SERVICE_GROUP" "$STATE_FS" "$STATE_FS/cache" \
-        "$STATE_FS/cache/matplotlib" "$STATE_FS/frames" "$STATE_FS/uploads"
+        "$STATE_FS/cache/matplotlib" "$STATE_FS/frames" "$STATE_FS/uploads" \
+        "$STATE_FS/control"
 fi
 
 install_configuration() {
@@ -383,8 +389,37 @@ install_token() {
     fi
 }
 
+install_control_token() {
+    reject_symlink "$CONTROL_TOKEN_FILE_FS" "control-panel token"
+    if [[ -e "$CONTROL_TOKEN_FILE_FS" && "$ROTATE_TOKEN" == false ]]; then
+        log "preserving existing control-panel token"
+    else
+        temporary="$(mktemp "$CONFIG_FS/.control-panel.token.XXXXXX")"
+        # A 48-bit code is short enough to enter on a phone while remaining
+        # impractical to guess on a trusted home LAN.
+        (umask 0077; python3 -c 'import secrets; print(secrets.token_hex(6))' >"$temporary")
+        grep -Eq '^[0-9a-f]{12}$' "$temporary" \
+            || die "could not generate a valid control-panel token"
+        chmod 0640 "$temporary"
+        if [[ -z "$DESTDIR" ]]; then
+            chown root:"$SERVICE_GROUP" "$temporary"
+        fi
+        mv -f -- "$temporary" "$CONTROL_TOKEN_FILE_FS"
+        if "$ROTATE_TOKEN"; then
+            log "rotated the control-panel token"
+        else
+            log "generated a control-panel token at $CONTROL_TOKEN_FILE (value not printed)"
+        fi
+    fi
+    chmod 0640 "$CONTROL_TOKEN_FILE_FS"
+    if [[ -z "$DESTDIR" ]]; then
+        chown root:"$SERVICE_GROUP" "$CONTROL_TOKEN_FILE_FS"
+    fi
+}
+
 install_configuration
 install_token
+install_control_token
 
 install -d -m 0755 "$INSTALL_FS/display_runtime"
 install -m 0644 "$SOURCE_DIR/README.md" "$INSTALL_FS/README.md"
@@ -411,6 +446,7 @@ render_units() {
             -e "s|@EINK_INSTALL_DIR@|$INSTALL_DIR|g" \
             -e "s|@EINK_CONFIG_PATH@|$CONFIG_PATH|g" \
             -e "s|@EINK_TOKEN_FILE@|$TOKEN_FILE|g" \
+            -e "s|@EINK_CONTROL_TOKEN_FILE@|$CONTROL_TOKEN_FILE|g" \
             -e "s|@EINK_STATE_DIR@|$STATE_DIR|g" \
             "$source" >"$temporary"
         if grep -q '@EINK_' "$temporary"; then
@@ -608,6 +644,7 @@ cat >"$INSTALL_FS/INSTALLATION" <<EOF
 Managed by install-raspberry-pi.sh
 config=$CONFIG_PATH
 token=$TOKEN_FILE
+control_token=$CONTROL_TOKEN_FILE
 state=$STATE_DIR
 user=$SERVICE_USER
 group=$SERVICE_GROUP
@@ -628,9 +665,12 @@ if [[ -z "$DESTDIR" ]]; then
     if ! "$NO_ENABLE"; then
         systemctl enable "${ENABLED_UNITS[@]}"
         if ! "$NO_START"; then
-            log "starting frame server and render timers"
+            log "starting frame server, control panel, and render timers"
             if ! systemctl restart "$SERVER_UNIT"; then
                 die "server restart failed"
+            fi
+            if ! systemctl restart "$CONTROL_UNIT"; then
+                die "control-panel restart failed"
             fi
             systemctl restart "$WEATHER_TIMER" "$BIRDS_TIMER" "$STAR_TIMER"
         fi
@@ -642,3 +682,4 @@ fi
 log "installation complete"
 log "edit $CONFIG_PATH, then run: systemctl start eink-display-render@MODE.service"
 log "retrieve the token securely from $TOKEN_FILE and provision it on the ESP32"
+log "open the phone control panel on port 8765; its access code is in $CONTROL_TOKEN_FILE"

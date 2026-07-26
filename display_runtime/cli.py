@@ -162,11 +162,6 @@ def _authentication_token(args, runtime: FrameRuntime) -> str:
             raise ConfigError(f"could not read authentication token file: {exc}") from exc
     else:
         token = runtime.config.server_auth_token
-    if not token:
-        raise ConfigError(
-            "an authentication token is required; set DISPLAY_RUNTIME_AUTH_TOKEN, "
-            "server.auth_token, or --token-file"
-        )
     if "\r" in token or "\n" in token:
         raise ConfigError("the authentication token must be a single line")
     return token

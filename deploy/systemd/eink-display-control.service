@@ -1,0 +1,47 @@
+[Unit]
+Description=E-ink frame mobile control panel
+Documentation=file://@EINK_INSTALL_DIR@/display_runtime/README.md
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsDirectory=@EINK_INSTALL_DIR@
+ConditionPathIsDirectory=@EINK_STATE_DIR@/control
+ConditionPathExists=@EINK_CONFIG_PATH@
+ConditionPathExists=@EINK_CONTROL_TOKEN_FILE@
+StartLimitIntervalSec=5min
+StartLimitBurst=12
+
+[Service]
+Type=simple
+User=@EINK_USER@
+Group=@EINK_GROUP@
+WorkingDirectory=@EINK_INSTALL_DIR@
+Environment=HOME=@EINK_HOME@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@EINK_INSTALL_DIR@/.venv/bin/eink-display-control --host 0.0.0.0 --port 8765 --runtime-config @EINK_CONFIG_PATH@ --settings @EINK_STATE_DIR@/control/settings.json --photo @EINK_STATE_DIR@/uploads/latest.png --access-token-file @EINK_CONTROL_TOKEN_FILE@
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+
+# Only the settings overlay and upload directory are writable. Runtime config
+# remains root-owned, and the authenticated frame server remains read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=@EINK_STATE_DIR@/control @EINK_STATE_DIR@/uploads
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -68,6 +69,17 @@ class RaspberryPiInstallerTests(unittest.TestCase):
         self.assertIn("rollback_post_swap", source)
         self.assertIn("trap finish_install EXIT", source)
 
+        with (REPOSITORY / "pyproject.toml").open("rb") as stream:
+            package = tomllib.load(stream)
+        self.assertEqual(
+            package["project"]["scripts"]["eink-display-control"],
+            "display_control.server:main",
+        )
+        self.assertIn(
+            "display_control*",
+            package["tool"]["setuptools"]["packages"]["find"]["include"],
+        )
+
     def test_staged_core_install_has_substituted_units_and_no_secret_leaks(self):
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory) / "root"
@@ -94,6 +106,7 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             unit_dir = stage / "etc/systemd/system"
             config = config_dir / "runtime.toml"
             token_file = config_dir / "frame-server.token"
+            control_token_file = config_dir / "control-panel.token"
 
             self.assertTrue((app / "install-raspberry-pi.sh").is_file())
             self.assertTrue((app / "display_runtime/README.md").is_file())
@@ -102,14 +115,20 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.assertTrue((state / "cache/matplotlib").is_dir())
             self.assertTrue((state / "frames").is_dir())
             self.assertTrue((state / "uploads").is_dir())
+            self.assertTrue((state / "control").is_dir())
             self.assertEqual(self.mode(config), 0o640)
             self.assertEqual(self.mode(token_file), 0o640)
+            self.assertEqual(self.mode(control_token_file), 0o640)
             self.assertEqual(self.mode(unit_dir / "eink-display-server.service"), 0o644)
 
             token = token_file.read_text(encoding="ascii").strip()
             self.assertRegex(token, r"^[0-9a-f]{64}$")
             self.assertNotIn(token, result.stdout)
             self.assertNotIn(token, result.stderr)
+            control_token = control_token_file.read_text(encoding="ascii").strip()
+            self.assertRegex(control_token, r"^[0-9a-f]{12}$")
+            self.assertNotIn(control_token, result.stdout)
+            self.assertNotIn(control_token, result.stderr)
 
             units = {
                 path.name: path.read_text(encoding="utf-8")
@@ -119,6 +138,7 @@ class RaspberryPiInstallerTests(unittest.TestCase):
                 set(units),
                 {
                     "eink-display-server.service",
+                    "eink-display-control.service",
                     "eink-display-render@.service",
                     "eink-display-weather.timer",
                     "eink-display-birds.timer",
@@ -134,6 +154,14 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.assertIn("WorkingDirectory=/srv/eink-app", combined_units)
             self.assertIn("--config /srv/eink-config/runtime.toml", combined_units)
             self.assertIn("--token-file /srv/eink-config/frame-server.token", combined_units)
+            self.assertIn(
+                "--access-token-file /srv/eink-config/control-panel.token",
+                combined_units,
+            )
+            self.assertIn(
+                "--settings /srv/eink-state/control/settings.json",
+                combined_units,
+            )
             self.assertIn("ReadWritePaths=/srv/eink-state", combined_units)
             self.assertIn("ReadOnlyPaths=/srv/eink-state", combined_units)
             self.assertIn("Restart=on-failure", units["eink-display-render@.service"])
@@ -153,11 +181,13 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             all_other_text = "\n".join(
                 path.read_text(encoding="utf-8", errors="replace")
                 for path in stage.rglob("*")
-                if path.is_file() and path != token_file
+                if path.is_file() and path not in (token_file, control_token_file)
             )
             self.assertNotIn(token, all_other_text)
+            self.assertNotIn(control_token, all_other_text)
             self.assertIn('/srv/eink-state/frames', config.read_text(encoding="utf-8"))
             self.assertIn('/srv/eink-state/uploads/latest.png', config.read_text(encoding="utf-8"))
+            self.assertIn('/srv/eink-state/control/settings.json', config.read_text(encoding="utf-8"))
 
     def test_staged_default_and_core_only_modes_both_install(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -178,19 +208,26 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.run_installer(stage, "--core-only", "--no-enable")
             config = stage / "etc/eink-display/runtime.toml"
             token = stage / "etc/eink-display/frame-server.token"
+            control_token = stage / "etc/eink-display/control-panel.token"
             state_sentinel = stage / "var/lib/eink-display/frames/operator-frame.ee02"
+            settings_sentinel = stage / "var/lib/eink-display/control/settings.json"
             custom_config = b"# operator configuration\n[runtime]\nstrict_sources = true\n"
             config.write_bytes(custom_config)
             original_token = token.read_bytes()
+            original_control_token = control_token.read_bytes()
             state_sentinel.write_bytes(b"last-known-good")
+            settings_sentinel.write_bytes(b'{"schema_version": 1}\n')
 
             result = self.run_installer(stage, "--core-only", "--no-enable")
 
             self.assertEqual(config.read_bytes(), custom_config)
             self.assertEqual(token.read_bytes(), original_token)
+            self.assertEqual(control_token.read_bytes(), original_control_token)
             self.assertEqual(state_sentinel.read_bytes(), b"last-known-good")
+            self.assertEqual(settings_sentinel.read_bytes(), b'{"schema_version": 1}\n')
             self.assertIn("preserving existing runtime configuration", result.stdout)
             self.assertIn("preserving existing bearer token", result.stdout)
+            self.assertIn("preserving existing control-panel token", result.stdout)
 
     def test_rotate_token_and_force_config_are_explicit_and_back_up_config(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,9 +235,11 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.run_installer(stage, "--core-only", "--no-enable")
             config = stage / "etc/eink-display/runtime.toml"
             token = stage / "etc/eink-display/frame-server.token"
+            control_token = stage / "etc/eink-display/control-panel.token"
             custom_config = b"# irreplaceable operator settings\n"
             config.write_bytes(custom_config)
             original_token = token.read_text(encoding="ascii")
+            original_control_token = control_token.read_text(encoding="ascii")
 
             result = self.run_installer(
                 stage,
@@ -211,8 +250,11 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             )
 
             replacement_token = token.read_text(encoding="ascii")
+            replacement_control_token = control_token.read_text(encoding="ascii")
             self.assertNotEqual(replacement_token, original_token)
+            self.assertNotEqual(replacement_control_token, original_control_token)
             self.assertRegex(replacement_token.strip(), r"^[0-9a-f]{64}$")
+            self.assertRegex(replacement_control_token.strip(), r"^[0-9a-f]{12}$")
             self.assertNotEqual(config.read_bytes(), custom_config)
             backups = list(config.parent.glob("runtime.toml.backup.*"))
             self.assertEqual(len(backups), 1)
@@ -221,6 +263,7 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.assertIn("backed up the previous runtime configuration", result.stdout)
             self.assertIn("rotated the bearer token", result.stdout)
             self.assertNotIn(replacement_token.strip(), result.stdout)
+            self.assertNotIn(replacement_control_token.strip(), result.stdout)
 
     def test_uninstall_preserves_data_and_purge_removes_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -233,6 +276,7 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             sentinel = state_dir / "frames/last-known-good.ee02"
             sentinel.write_bytes(b"frame")
             token_before = (config_dir / "frame-server.token").read_bytes()
+            control_token_before = (config_dir / "control-panel.token").read_bytes()
 
             result = self.run_installer(stage, "--uninstall")
 
@@ -240,6 +284,10 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.assertFalse(any(unit_dir.glob("eink-display-*")))
             self.assertTrue(config_dir.is_dir())
             self.assertEqual((config_dir / "frame-server.token").read_bytes(), token_before)
+            self.assertEqual(
+                (config_dir / "control-panel.token").read_bytes(),
+                control_token_before,
+            )
             self.assertEqual(sentinel.read_bytes(), b"frame")
             self.assertIn("preserved /etc/eink-display and /var/lib/eink-display", result.stdout)
 
@@ -318,7 +366,7 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             )
             self.assertFalse(stage.exists())
             self.assertIn("dry run: would install runtime at /opt/eink-display", result.stdout)
-            self.assertIn("would rotate the bearer token without printing it", result.stdout)
+            self.assertIn("would rotate the access tokens without printing them", result.stdout)
             self.assertNotRegex(result.stdout, re.compile(r"\b[0-9a-f]{64}\b"))
 
 

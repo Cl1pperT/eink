@@ -225,8 +225,8 @@ class SimulatedESPClient:
             raise ValueError("server_url must be an http(s) URL without embedded credentials")
         if parsed.query or parsed.fragment:
             raise ValueError("server_url must not contain a query string or fragment")
-        if not isinstance(token, str) or not token:
-            raise ValueError("an authentication token is required")
+        if not isinstance(token, str):
+            raise ValueError("the authentication token must be a string")
         if "\r" in token or "\n" in token:
             raise ValueError("the authentication token must be a single line")
         if timeout <= 0 or chunk_size <= 0:
@@ -264,10 +264,11 @@ class SimulatedESPClient:
 
     def _request(self, path: str, *, etag: str = "") -> tuple[Any | None, bool]:
         headers = {
-            "Authorization": f"Bearer {self.token}",
             "Accept-Encoding": "identity",
             "User-Agent": "eink-display-esp-simulator/1",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if etag:
             headers["If-None-Match"] = etag
         request = Request(f"{self.server_url}{path}", headers=headers, method="GET")

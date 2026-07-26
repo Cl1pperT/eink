@@ -1,9 +1,10 @@
-# ESP32 EE02 frame client
+# ESP32 EE02 button image updater
 
 This PlatformIO/Arduino project targets a Seeed Studio XIAO ESP32S3 with PSRAM,
 the XIAO ePaper Display Board EE02, and the 13.3-inch T133A01 Spectra 6 panel.
-It pulls the headless runtime's authenticated frame endpoint and gives
-Seeed_GFX the exact 960,000-byte 4bpp sprite buffer produced by the Pi.
+On power-up or a press of any of the three user buttons, it checks the
+headless runtime's authenticated `uploaded-photo` frame endpoint. It refreshes
+the panel only when that frame has changed, then returns to deep sleep.
 
 The firmware deliberately does not render, rotate, resize, dither, or
 re-encode. It downloads into a second PSRAM buffer, verifies HTTP metadata,
@@ -21,18 +22,19 @@ cd firmware/esp32-ee02
 cp include/secrets.example.h include/secrets.h
 ```
 
-Edit `include/secrets.h` with the Wi-Fi credentials, Pi URL, and the complete
-token from `/etc/eink-display/frame-server.token`. Do not commit that file. The
-Pi URL must be plain `http://<pi-address>:8787` because the built-in runtime
-server does not terminate TLS. Prefer a DHCP-reserved numeric address or a
-hostname supplied by your router; this skeleton does not assume `.local` mDNS.
+Edit `include/secrets.h` with the Wi-Fi credentials and Pi URL. A bearer token
+is optional: omit `EINK_FRAME_AUTH_TOKEN` for a public, read-only frame endpoint
+on a trusted LAN, or set it to the Pi's token when authentication is enabled.
+Do not commit that file. The Pi URL must be plain
+`http://<pi-address>:8787` because the built-in runtime server does not
+terminate TLS.
 
-Build, upload, and monitor:
+Build, upload, and monitor (replace the port if macOS assigned another one):
 
 ```bash
 pio run
-pio run --target upload
-pio device monitor
+pio run --target upload --upload-port /dev/cu.usbmodem101
+pio device monitor --port /dev/cu.usbmodem101
 ```
 
 The project pins PlatformIO's ESP32 platform and Seeed_GFX V3.1.0 by immutable
@@ -46,44 +48,30 @@ EE02 refresh still needs to be checked when the hardware is available.
 
 ## Operation
 
-The default is unattended `automatic` mode. The ESP32 synchronizes time over
-NTP and selects weather from 06:00, birds from 10:00, and the star map from
-20:00 through the following morning. `device_config.h` controls the POSIX
-timezone, boundaries, default, and poll interval; keep them aligned with the
-Pi's TOML timezone/schedule and systemd timers. If NTP is temporarily
-unavailable, the client retains the last displayed concrete mode instead of
-guessing a new one. The supplied Pi timers render each target five minutes
-before these boundaries so the new atomic frame is normally committed first.
+The flow is intentionally small:
 
-On each poll the client sends `Authorization: Bearer ...` and, when
-it has a known displayed checksum, `If-None-Match`. An HTTP 304 skips the slow
-panel refresh. Successful ETag, mode, and SHA-256 state are stored in ESP32 NVS
-and survive reboot; the e-paper itself preserves the corresponding image
-without power. Before touching the panel, firmware commits an invalid NVS
-marker; it marks the new checksum valid only after the refresh and all state
-writes complete. A reset at any intermediate point therefore forces a safe
-unconditional download on the next boot. If the panel is replaced or cleared outside this firmware, send
-`r` once so a persisted ETag cannot suppress its first refresh. A forced
-refresh remains pending across network or server failures and retries every 30
-seconds until a verified frame reaches the panel or another mode is selected.
+1. Power-up, reset, firmware upload, or any user button wakes the ESP32.
+2. The board joins Wi-Fi and checks the configured frame.
+3. HTTP 304 or a matching SHA-256 skips the slow panel refresh.
+4. A verified new frame refreshes the display.
+5. The ESP32 turns Wi-Fi off and deep-sleeps until the next button press.
 
-Serial commands provide manual control before physical buttons are wired:
+The default frame is `uploaded-photo`. Change `EINK_FRAME_MODE` in
+`include/device_config.h` if another single concrete server frame is desired.
+GPIO 2, 3, and 5 are the EE02's active-low user buttons. All three currently
+perform the same check.
 
-- `a`: resume the automatic schedule
-- `w`: weather
-- `b`: birds
-- `s`: star map
-- `p`: uploaded photo
-- `t`: test pattern
-- `r`: force a full download and refresh
+Successful ETag, mode, and SHA-256 state are stored in ESP32 NVS and survive
+deep sleep; the e-paper preserves its image without power. Before touching the
+panel, firmware commits an invalid NVS marker and only marks the new checksum
+valid after the refresh and state writes complete. A reset during an update
+therefore causes a safe unconditional download on the next wake.
 
-The Pi must have already rendered each concrete mode. `automatic` is local
-firmware scheduling rather than an HTTP mode. A mode with no committed frame
-returns an error and leaves the display alone.
+A network, server, or validation error leaves the old image intact and returns
+the board to sleep. Press a button to try again.
 
-Because the current Pi server is HTTP, the bearer credential is not encrypted
-on the wire. Keep both devices on a trusted LAN, restrict port 8787 to the
-ESP32 where practical, and never expose it to the public internet.
+The server uses HTTP. Keep it on a trusted LAN and never expose port 8787 to
+the public internet.
 
 ## Exact display contract
 
@@ -113,5 +101,5 @@ are the hardware references for this target.
   partition before provisioning the secrets again.
 - `HTTP 401`: copy the complete current Pi token again after any token rotation.
 - `HTTP 404`: render that concrete mode on the Pi at least once.
-- A replacement or externally cleared panel: send `r`; the request remains
-  forced across temporary failures until a verified refresh succeeds.
+- A replacement or externally cleared panel: erase the board's NVS or change
+  the frame once so the stored ETag cannot suppress the first refresh.

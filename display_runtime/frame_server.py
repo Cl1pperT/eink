@@ -1,4 +1,4 @@
-"""Authenticated HTTP access to committed EE02 frame artifacts.
+"""HTTP access to committed EE02 frame artifacts, with optional authentication.
 
 The server deliberately does not render frames.  It only exposes a mode's
 atomically committed ``current.json`` and the immutable, content-addressed
@@ -315,8 +315,6 @@ class FrameServer(ThreadingHTTPServer):
         log_requests: bool = True,
     ) -> None:
         token = str(auth_token)
-        if not token:
-            raise ValueError("auth_token must not be empty")
         if "\r" in token or "\n" in token:
             raise ValueError("auth_token must be a single line")
         if type(chunk_size) is not int or chunk_size <= 0:
@@ -447,6 +445,8 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
             self._send_json_error(503, "artifact_unavailable", send_body=send_body)
 
     def _is_authorized(self) -> bool:
+        if not self.frame_server.auth_token:
+            return True
         provided = self.headers.get("Authorization", "").encode("utf-8")
         expected = b"Bearer " + self.frame_server.auth_token
         return hmac.compare_digest(provided, expected)

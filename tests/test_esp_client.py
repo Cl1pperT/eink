@@ -76,12 +76,12 @@ def commit_frame(output: Path, mode: str, byte: int) -> tuple[bytes, str, Path]:
 
 
 @contextmanager
-def serving(output: Path):
+def serving(output: Path, *, auth_token: str = TOKEN):
     try:
         server = FrameServer(
             ("127.0.0.1", 0),
             output_directory=output,
-            auth_token=TOKEN,
+            auth_token=auth_token,
             chunk_size=8192,
             log_requests=False,
         )
@@ -99,6 +99,15 @@ def serving(output: Path):
 
 
 class SimulatedESPClientTests(unittest.TestCase):
+    def test_empty_token_works_with_public_lan_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "served"
+            commit_frame(output, "weather", 0x0B)
+            with serving(output, auth_token="") as url:
+                result = SimulatedESPClient(url, "", root / "esp").pull("weather")
+            self.assertTrue(result.changed)
+
     def test_runtime_generated_manifest_and_payload_sync_end_to_end(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

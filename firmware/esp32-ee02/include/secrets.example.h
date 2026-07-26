@@ -6,4 +6,6 @@
 #define EINK_WIFI_SSID "replace-with-wifi-name"
 #define EINK_WIFI_PASSWORD "replace-with-wifi-password"
 #define EINK_FRAME_SERVER_URL "http://replace-with-pi-address:8787"
-#define EINK_FRAME_AUTH_TOKEN "replace-with-pi-frame-server-token"
+// Optional: omit this definition or leave it empty for an unauthenticated
+// frame server on a trusted LAN.
+#define EINK_FRAME_AUTH_TOKEN ""

@@ -5,10 +5,11 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from display_runtime.cli import main
+from display_runtime.cli import _authentication_token, main
 
 
 class RuntimeCliTests(unittest.TestCase):
@@ -73,17 +74,12 @@ class RuntimeCliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("configuration error", stderr.getvalue())
 
-    def test_network_commands_refuse_to_run_without_authentication(self):
-        with tempfile.TemporaryDirectory() as directory:
-            config = Path(directory) / "runtime.toml"
-            config.write_text("", encoding="utf-8")
-            for command in (("serve",), ("esp-sync", "weather")):
-                with self.subTest(command=command):
-                    stderr = io.StringIO()
-                    with mock.patch.dict("os.environ", {}, clear=True), redirect_stderr(stderr):
-                        code = main(["--config", str(config), *command])
-                    self.assertEqual(code, 2)
-                    self.assertIn("authentication token is required", stderr.getvalue())
+    def test_network_commands_allow_public_lan_mode(self):
+        args = SimpleNamespace(token_file=None)
+        runtime = SimpleNamespace(
+            config=SimpleNamespace(server_auth_token="")
+        )
+        self.assertEqual(_authentication_token(args, runtime), "")
 
 
 if __name__ == "__main__":

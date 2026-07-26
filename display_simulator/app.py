@@ -15,7 +15,12 @@ from .config import DEFAULTS, load_config
 from .controller import RenderController
 from .models import ConversionSettings, FitMode, Orientation, RenderContext, RenderResult
 from .pipeline import normalize_source, unsupported_colors
-from .preferences import load_preferences, repository_preference_value, save_preferences
+from .preferences import (
+    load_preferences,
+    preferences_path,
+    repository_preference_value,
+    save_preferences,
+)
 from .repositories import find_avian_repository, find_repository
 from .schedule import ScheduleConfig, mode_for_time, parse_clock
 from .sources import BirdsSource, StarMapSource, TestPatternSource, UploadedPhotoSource, WeatherSource
@@ -38,7 +43,7 @@ class SimulatorApp:
         self.controller = RenderController()
         self.results: queue.Queue[tuple[int, object]] = queue.Queue()
         self.uploads: queue.Queue[Path] = queue.Queue()
-        self.upload_server: UploadServer | None = None
+        self.upload_server: object | None = None
         self.result: RenderResult | None = None
         self.active_token = 0
         self.busy = False
@@ -121,7 +126,69 @@ class SimulatorApp:
         self.physical = tk.BooleanVar(value=c["display"]["physical_treatment"])
         self.button_maps = [tk.StringVar(value=c["buttons"][f"button{i}"]) for i in range(1, 4)]
         self.status = tk.StringVar(value="Ready")
-        self.upload_status = tk.StringVar(value="Upload page stopped")
+        self.upload_status = tk.StringVar(value="Phone control panel stopped")
+        control = self._read_control_settings()
+        display = control.get("display") if isinstance(control.get("display"), dict) else {}
+        photo = control.get("photo") if isinstance(control.get("photo"), dict) else {}
+        if isinstance(display.get("location_name"), str) and display["location_name"].strip():
+            self.location.set(display["location_name"].strip())
+        if isinstance(display.get("caption"), bool):
+            self.weather_caption.set(display["caption"])
+        if isinstance(photo.get("caption"), str):
+            self.caption.set(photo["caption"])
+        if photo.get("rotation") in (0, 90, 180, 270):
+            self.rotation.set(photo["rotation"])
+        control_photo = self._control_photo_path(control)
+        if control_photo:
+            self.photo_path.set(control_photo)
+
+    def _control_settings_path(self) -> Path:
+        configured = str(self.config.get("control", {}).get("settings", "")).strip()
+        if configured:
+            path = Path(configured).expanduser()
+            return path if path.is_absolute() else (Path.cwd() / path).resolve(strict=False)
+        try:
+            from display_control.settings import default_settings_path
+
+            return Path(default_settings_path()).expanduser()
+        except (ImportError, OSError, TypeError, ValueError):
+            return preferences_path().with_name("control-settings.json")
+
+    def _read_control_settings(self) -> dict:
+        path = self._control_settings_path()
+        if not path.is_file():
+            return {}
+        try:
+            from display_control.settings import discover_catalog, load_settings
+
+            repository = self.avian_weather_repo.get().strip() if hasattr(self, "avian_weather_repo") else ""
+            catalog = discover_catalog(Path(repository) if repository else None)
+            value = load_settings(path, catalog=catalog, strict=True)
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        nested = value.get("control_panel")
+        return dict(nested) if isinstance(nested, dict) else value
+
+    def _control_photo_path(self, settings: dict) -> str:
+        photo = settings.get("photo") if isinstance(settings.get("photo"), dict) else {}
+        explicit = photo.get("path") or settings.get("photo_path")
+        if isinstance(explicit, str) and explicit.strip():
+            path = Path(explicit).expanduser()
+            if not path.is_absolute():
+                path = self._control_settings_path().parent / path
+            if path.is_file():
+                return str(path.resolve(strict=False))
+        try:
+            from display_control.settings import default_photo_path
+
+            path = Path(default_photo_path(self._control_settings_path())).expanduser()
+            if path.is_file():
+                return str(path.resolve(strict=False))
+        except (ImportError, OSError, TypeError, ValueError):
+            pass
+        return self.photo_path.get().strip()
 
     def _build_ui(self) -> None:
         width, height = self.config["window"]["width"], self.config["window"]["height"]
@@ -226,7 +293,7 @@ class SimulatorApp:
         ttk.Label(photo, text="Caption").grid(row=3, column=0, sticky="w")
         ttk.Entry(photo, textvariable=self.caption).grid(row=3, column=1, sticky="ew")
         ttk.Button(photo, text="Convert to E-Ink", command=lambda: self._generate_as("Uploaded Photo")).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        self.upload_button = ttk.Button(photo, text="Start LAN Upload Page", command=self._toggle_upload_server)
+        self.upload_button = ttk.Button(photo, text="Start Phone Control Panel", command=self._toggle_upload_server)
         self.upload_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         ttk.Label(photo, textvariable=self.upload_status, wraplength=340).grid(row=6, column=0, columnspan=2, sticky="w")
 
@@ -286,15 +353,54 @@ class SimulatorApp:
                 "Uploaded Photo": UploadedPhotoSource, "Test Pattern": TestPatternSource}[mode]()
 
     def _context(self) -> RenderContext:
+        control = self._read_control_settings()
+        display = control.get("display") if isinstance(control.get("display"), dict) else {}
+        photo = control.get("photo") if isinstance(control.get("photo"), dict) else {}
+        location = display.get("location_name")
+        if not isinstance(location, str) or not location.strip():
+            location = self.location.get().strip()
+        weather_units = display.get("units")
+        if weather_units not in ("imperial", "metric"):
+            weather_units = "imperial"
+        weather_caption = display.get("caption")
+        if not isinstance(weather_caption, bool):
+            weather_caption = self.weather_caption.get()
+        photo_caption = photo.get("caption")
+        if not isinstance(photo_caption, str):
+            photo_caption = self.caption.get()
+        photo_rotation = photo.get("rotation")
+        if photo_rotation not in (0, 90, 180, 270):
+            photo_rotation = self.rotation.get()
+        enabled_locations = control.get("enabled_locations")
+        if not isinstance(enabled_locations, list):
+            enabled_locations = None
+        enabled_activities = control.get("enabled_activities")
+        if not isinstance(enabled_activities, list):
+            enabled_activities = None
+        activity_overrides = control.get("activity_overrides")
+        if not isinstance(activity_overrides, dict):
+            activity_overrides = {}
+        recommendation_count = control.get("recommendation_count", 5)
+        if not isinstance(recommendation_count, int) or isinstance(recommendation_count, bool):
+            recommendation_count = 5
+        minimum_suitability = control.get("minimum_suitability", 0.0)
+        if isinstance(minimum_suitability, bool) or not isinstance(minimum_suitability, (int, float)):
+            minimum_suitability = 0.0
         settings = f"dither={self.dither.get()} · saturation={self.saturation.get():.2f} · blue bias={self.blue_bias.get():.2f}"
         return RenderContext(
-            orientation=Orientation(self.orientation.get()), when=self._when(), location=self.location.get().strip(),
+            orientation=Orientation(self.orientation.get()), when=self._when(), location=location.strip(),
             offline=self.demo_weather.get(), options={"bird_source": self.bird_source.get(), "demo_birds": self.demo_birds.get(),
                 "avian_repo": self.avian_weather_repo.get(), "weather_repo": self.avian_weather_repo.get(), "inkystarmap_repo": self.inkystarmap_repo.get(),
                 "starmap_source": self.starmap_source.get(), "dark_starmap": self.dark_starmap.get(),
                 "use_inkystarmap": self.use_inkystarmap.get(), "latitude": self.latitude.get(), "longitude": self.longitude.get(), "direction": self.direction.get(), "timezone": self.timezone.get(),
-                "weather_style": self.weather_style.get(), "weather_scene_source": self.weather_scene_source.get(), "weather_caption": self.weather_caption.get(),
-                "photo_path": self.photo_path.get(), "rotation": self.rotation.get(), "caption": self.caption.get(),
+                "weather_style": self.weather_style.get(), "weather_scene_source": self.weather_scene_source.get(), "weather_environment": "auto",
+                "enabled_environments": tuple(enabled_locations) if enabled_locations is not None else None,
+                "enabled_activity_ids": tuple(enabled_activities) if enabled_activities is not None else None,
+                "activity_overrides": activity_overrides, "recommendation_count": recommendation_count,
+                "minimum_suitability": float(minimum_suitability), "weather_caption": weather_caption,
+                "weather_units": weather_units,
+                "photo_path": self._control_photo_path(control), "rotation": photo_rotation, "caption": photo_caption,
+                "photo_enabled": photo.get("enabled", True) is not False,
                 "settings_label": settings})
 
     def generate(self) -> None:
@@ -302,6 +408,8 @@ class SimulatorApp:
             self.controller.invalidate()
         try:
             mode, context = self._selected_mode(), self._context()
+            if mode == "Uploaded Photo" and context.options.get("photo_enabled") is False:
+                raise ValueError("Personal photos are disabled in the Phone Control Panel")
         except Exception as exc:
             messagebox.showerror("Invalid simulator settings", str(exc))
             return
@@ -422,19 +530,41 @@ class SimulatorApp:
     def _toggle_upload_server(self) -> None:
         if self.upload_server:
             self.upload_server.stop(); self.upload_server = None
-            self.upload_status.set("Upload page stopped"); self.upload_button.configure(text="Start LAN Upload Page")
+            self.upload_status.set("Phone control panel stopped"); self.upload_button.configure(text="Start Phone Control Panel")
             return
         cfg = self.config["upload"]
         output = Path(str(cfg["file"])).expanduser()
         if not output.is_absolute(): output = Path.cwd() / output
         try:
-            self.upload_server = UploadServer(str(cfg["host"]), int(cfg["port"]), output,
-                                              int(cfg["max_megabytes"]) * 1024 * 1024, self.uploads.put)
+            try:
+                from display_control.server import ControlServer
+                from display_control.settings import default_photo_path
+            except ImportError:
+                self.upload_server = UploadServer(
+                    str(cfg["host"]),
+                    int(cfg["port"]),
+                    output,
+                    int(cfg["max_megabytes"]) * 1024 * 1024,
+                    self.uploads.put,
+                )
+            else:
+                settings_path = self._control_settings_path()
+                photo_path = Path(default_photo_path(settings_path)).expanduser()
+                weather_repo = self.avian_weather_repo.get().strip()
+                self.upload_server = ControlServer(
+                    str(cfg["host"]),
+                    int(cfg["port"]),
+                    settings_path=settings_path,
+                    photo_path=photo_path,
+                    weather_repo=Path(weather_repo) if weather_repo else None,
+                    max_bytes=int(cfg["max_megabytes"]) * 1024 * 1024,
+                    callback=self.uploads.put,
+                )
             self.upload_server.start()
-        except OSError as exc:
-            self.upload_server = None; messagebox.showerror("Could not start upload page", str(exc)); return
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            self.upload_server = None; messagebox.showerror("Could not start phone control panel", str(exc)); return
         self.upload_status.set(f"Listening at {self.upload_server.url}")
-        self.upload_button.configure(text="Stop LAN Upload Page")
+        self.upload_button.configure(text="Stop Phone Control Panel")
 
     def _poll_uploads(self) -> None:
         latest = None
@@ -481,26 +611,43 @@ class SimulatorApp:
         self._save_preferences()
 
     def _save_preferences(self) -> None:
-        data = {
+        # Reload first so a running control panel cannot lose unrelated keys
+        # (or a just-saved control_panel document) to this long-lived Tk app.
+        data = load_preferences()
+        if not isinstance(data, dict):
+            data = {}
+        repositories = (
+            dict(data.get("repositories", {}))
+            if isinstance(data.get("repositories"), dict)
+            else {}
+        )
+        repositories.update({
+            key: repository_preference_value(
+                variable.get(),
+                self._repository_display_defaults[key],
+                self._saved_repository_preferences[key],
+                explicitly_selected=key in self._explicit_repository_selections,
+            )
+            for key, variable in (
+                ("avian_weather", self.avian_weather_repo),
+                ("inkystarmap", self.inkystarmap_repo),
+            )
+        })
+        sources = (
+            dict(data.get("sources", {}))
+            if isinstance(data.get("sources"), dict)
+            else {}
+        )
+        sources.update({
+            "bird": self.bird_source.get().strip(),
+            "starmap": self.starmap_source.get().strip(),
+            "photo": self.photo_path.get().strip(),
+        })
+        data.update({
             "location": self.location.get().strip(),
-            "repositories": {
-                key: repository_preference_value(
-                    variable.get(),
-                    self._repository_display_defaults[key],
-                    self._saved_repository_preferences[key],
-                    explicitly_selected=key in self._explicit_repository_selections,
-                )
-                for key, variable in (
-                    ("avian_weather", self.avian_weather_repo),
-                    ("inkystarmap", self.inkystarmap_repo),
-                )
-            },
-            "sources": {
-                "bird": self.bird_source.get().strip(),
-                "starmap": self.starmap_source.get().strip(),
-                "photo": self.photo_path.get().strip(),
-            },
-        }
+            "repositories": repositories,
+            "sources": sources,
+        })
         try:
             save_preferences(data)
             self.user_preferences = data

@@ -1,14 +1,48 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import math
 import sys
 from datetime import datetime
+from pathlib import Path
+from typing import Mapping
 from PIL import Image, ImageDraw
 
 from ..models import RenderContext
 from ..repositories import find_repository
 from .drawing import font
+
+
+def _prepare_repository_import(repository: Path) -> None:
+    """Make repository changes take effect in a long-lived simulator process."""
+
+    resolved = repository.resolve(strict=False)
+    existing = sys.modules.get("weather_frame")
+    existing_file = getattr(existing, "__file__", None) if existing is not None else None
+    belongs_to_repository = False
+    if existing_file:
+        try:
+            Path(existing_file).resolve(strict=False).relative_to(resolved)
+            belongs_to_repository = True
+        except (OSError, ValueError):
+            pass
+    if existing is not None and not belongs_to_repository:
+        for name in tuple(sys.modules):
+            if name in ("weather_frame", "frame", "season") or name.startswith(
+                ("weather_frame.", "frame.", "season.")
+            ):
+                sys.modules.pop(name, None)
+
+    # AvianVisitors itself supplies weather_frame/frame; its parent commonly
+    # supplies the sibling season package. Keep both ahead of earlier checkouts.
+    candidates = [str(resolved)]
+    if (resolved.parent / "season" / "__init__.py").is_file():
+        candidates.append(str(resolved.parent))
+    for candidate in reversed(candidates):
+        while candidate in sys.path:
+            sys.path.remove(candidate)
+        sys.path.insert(0, candidate)
 
 
 class WeatherSource:
@@ -23,9 +57,8 @@ class WeatherSource:
         return self._demo(context)
 
     def _render_repository(self, repository, context: RenderContext) -> Image.Image:
-        repo_text = str(repository)
-        if repo_text not in sys.path:
-            sys.path.insert(0, repo_text)
+        repository = Path(repository)
+        _prepare_repository_import(repository)
         try:
             weather = importlib.import_module("weather_frame.weather")
             renderer = importlib.import_module("weather_frame.renderer")
@@ -55,14 +88,51 @@ class WeatherSource:
                 country_code=str(context.options.get("country_code", "")),
                 timeout=float(context.options.get("weather_timeout", 30)),
             )
-        return renderer.render_forecast(
-            forecast,
-            style=str(context.options.get("weather_style", "woodblock")),
-            caption=bool(context.options.get("weather_caption", False)),
-            units=str(context.options.get("weather_units", "imperial")),
-            scene_source=str(context.options.get("weather_scene_source", "auto")),
-            environment=str(context.options.get("weather_environment", "auto")),
-        ).convert("RGB")
+        activity_names: tuple[str, ...] = ()
+        try:
+            activity_module = importlib.import_module("weather_frame.activities")
+            recommend = activity_module.recommend_activities
+            enabled = context.options.get("enabled_activity_ids")
+            if isinstance(enabled, str):
+                enabled = (enabled,)
+            elif enabled is not None and not isinstance(enabled, (list, tuple, set, frozenset)):
+                enabled = None
+            overrides = context.options.get("activity_overrides")
+            if not isinstance(overrides, Mapping):
+                overrides = {}
+            count = context.options.get("recommendation_count", 5)
+            if not isinstance(count, int) or isinstance(count, bool):
+                count = 5
+            minimum = context.options.get("minimum_suitability", 0.0)
+            if isinstance(minimum, bool) or not isinstance(minimum, (int, float)):
+                minimum = 0.0
+            parameters = inspect.signature(recommend).parameters
+            recommendation_kwargs = {"limit": max(0, count)}
+            if "enabled_activity_ids" in parameters:
+                recommendation_kwargs["enabled_activity_ids"] = enabled
+            if "activity_overrides" in parameters:
+                recommendation_kwargs["activity_overrides"] = overrides
+            if "minimum_suitability" in parameters:
+                recommendation_kwargs["minimum_suitability"] = float(minimum)
+            activity_names = tuple(recommend(forecast, **recommendation_kwargs))
+        except (ImportError, RuntimeError, TypeError, ValueError):
+            # Older AvianVisitors checkouts and installs without the sibling
+            # season package continue to render the base weather scene.
+            activity_names = ()
+
+        render_kwargs = {
+            "style": str(context.options.get("weather_style", "woodblock")),
+            "caption": bool(context.options.get("weather_caption", False)),
+            "units": str(context.options.get("weather_units", "imperial")),
+            "scene_source": str(context.options.get("weather_scene_source", "auto")),
+            "environment": str(context.options.get("weather_environment", "auto")),
+        }
+        render_parameters = inspect.signature(renderer.render_forecast).parameters
+        if "enabled_environments" in render_parameters:
+            render_kwargs["enabled_environments"] = context.options.get("enabled_environments")
+        if "activity_names" in render_parameters:
+            render_kwargs["activity_names"] = activity_names
+        return renderer.render_forecast(forecast, **render_kwargs).convert("RGB")
 
     def _demo(self, context: RenderContext) -> Image.Image:
         w, h = context.width, context.height

@@ -4,7 +4,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import importlib
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -78,6 +80,178 @@ _SOURCE_FACTORIES: Mapping[str, Callable[[], Any]] = {
     "uploaded-photo": UploadedPhotoSource,
     "test-pattern": TestPatternSource,
 }
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _first_value(*values: Any, default: Any = None) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return default
+
+
+def _load_control_overlay(
+    path: Path | None,
+    weather_repository: Path | None,
+) -> dict[str, Any]:
+    """Read the mutable control-panel settings without coupling the renderer to it.
+
+    The control panel is an optional companion service. A missing state file or
+    package must not prevent an otherwise valid TOML-only installation from
+    rendering. Invalid files are likewise ignored here; the control server owns
+    validation and writes replacements atomically.
+    """
+
+    if path is None or not path.is_file():
+        return {}
+    try:
+        settings_module = importlib.import_module("display_control.settings")
+        load_settings = settings_module.load_settings
+        catalog = None
+        load_catalog = getattr(
+            settings_module,
+            "discover_catalog",
+            getattr(settings_module, "load_catalog", None),
+        )
+        if callable(load_catalog):
+            try:
+                catalog = load_catalog(weather_repository)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                catalog = None
+        parameters = inspect.signature(load_settings).parameters
+        kwargs: dict[str, Any] = {}
+        if "catalog" in parameters:
+            kwargs["catalog"] = catalog
+        if "strict" in parameters:
+            kwargs["strict"] = True
+        if "strict" not in parameters and catalog is not None:
+            # Older control packages had a forgiving loader that substituted
+            # defaults for malformed JSON. Validate the raw document directly
+            # so corrupt mutable state never overrides the trusted TOML config.
+            validate_settings = getattr(settings_module, "validate_settings", None)
+            if callable(validate_settings):
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                loaded = validate_settings(raw, catalog)
+            else:
+                loaded = load_settings(path, **kwargs)
+        else:
+            loaded = load_settings(path, **kwargs)
+    except (
+        ImportError,
+        AttributeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        return {}
+    if not isinstance(loaded, Mapping):
+        return {}
+    nested = loaded.get("control_panel")
+    return dict(nested) if isinstance(nested, Mapping) else dict(loaded)
+
+
+def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize supported settings-schema spellings into render options."""
+
+    locations = _mapping(settings.get("locations") or settings.get("location"))
+    activities = _mapping(settings.get("activities"))
+    weather = _mapping(settings.get("weather"))
+    display = _mapping(settings.get("display"))
+    photo = _mapping(settings.get("photo"))
+
+    enabled_environments = _first_value(
+        settings.get("enabled_locations"),
+        settings.get("enabled_environments"),
+        locations.get("enabled_environments"),
+        locations.get("enabled"),
+        locations.get("selected"),
+    )
+    enabled_activity_ids = _first_value(
+        settings.get("enabled_activities"),
+        settings.get("enabled_activity_ids"),
+        activities.get("enabled_activity_ids"),
+        activities.get("enabled"),
+        activities.get("selected"),
+    )
+    overrides = _first_value(
+        settings.get("activity_overrides"),
+        activities.get("activity_overrides"),
+        activities.get("overrides"),
+        default={},
+    )
+    return {
+        "location": _first_value(
+            settings.get("location_name"),
+            display.get("location_name"),
+            locations.get("location_name"),
+            locations.get("forecast_location"),
+            locations.get("name"),
+        ),
+        "enabled_environments": enabled_environments,
+        "weather_environment": _first_value(
+            settings.get("weather_environment"),
+            weather.get("environment"),
+            locations.get("environment"),
+        ),
+        "enabled_activity_ids": enabled_activity_ids,
+        "activity_overrides": overrides if isinstance(overrides, Mapping) else {},
+        "recommendation_count": _first_value(
+            settings.get("recommendation_count"),
+            activities.get("recommendation_count"),
+            activities.get("limit"),
+            activities.get("count"),
+        ),
+        "minimum_suitability": _first_value(
+            settings.get("minimum_suitability"),
+            activities.get("minimum_suitability"),
+            activities.get("min_suitability"),
+        ),
+        "weather_caption": _first_value(
+            settings.get("weather_caption"),
+            weather.get("caption"),
+            display.get("weather_caption"),
+            display.get("caption"),
+        ),
+        "weather_units": _first_value(
+            settings.get("weather_units"),
+            weather.get("units"),
+            display.get("weather_units"),
+            display.get("units"),
+        ),
+        "photo_path": _first_value(settings.get("photo_path"), photo.get("path")),
+        "photo_caption": _first_value(settings.get("photo_caption"), photo.get("caption")),
+        "photo_rotation": _first_value(settings.get("photo_rotation"), photo.get("rotation")),
+        "photo_enabled": _first_value(
+            settings.get("photo_enabled"),
+            photo.get("enabled"),
+            default=True,
+        ),
+    }
+
+
+def _overlay_path(value: Any, settings_path: Path | None) -> Path | None:
+    if not isinstance(value, (str, os.PathLike)) or not str(value).strip():
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute() and settings_path is not None:
+        path = settings_path.parent / path
+    return path.resolve(strict=False)
+
+
+def _string_tuple(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = (value,)
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return None
+    result = tuple(str(item).strip() for item in value if str(item).strip())
+    return result
 
 
 class RuntimeRenderError(RuntimeError):
@@ -294,6 +468,36 @@ class FrameRuntime:
             return requested
         return canonical_mode(mode_for_time(when, self.config.schedule))
 
+    def _control_settings(self) -> dict[str, Any]:
+        loaded = _load_control_overlay(
+            self.config.control_settings_path,
+            self.config.avian_weather_repo,
+        )
+        return _control_values(loaded) if loaded else {}
+
+    def _photo_path(self, control: Mapping[str, Any]) -> Path | None:
+        overlay = _overlay_path(
+            control.get("photo_path"),
+            self.config.control_settings_path,
+        )
+        if overlay is not None and overlay.is_file():
+            return overlay
+        if self.config.photo_path is not None:
+            return self.config.photo_path
+        # A standalone macOS control server normally writes beside its settings
+        # file. Pi installs configure sources.photo explicitly, so that path
+        # remains authoritative instead of deriving control/latest-upload.png.
+        if control and self.config.control_settings_path is not None:
+            try:
+                settings_module = importlib.import_module("display_control.settings")
+                default_photo_path = settings_module.default_photo_path
+                derived = Path(default_photo_path(self.config.control_settings_path)).expanduser()
+            except (ImportError, AttributeError, OSError, TypeError, ValueError):
+                derived = None
+            if derived is not None:
+                return derived.resolve(strict=False)
+        return overlay
+
     def _repository(
         self,
         path: Path | None,
@@ -315,8 +519,15 @@ class FrameRuntime:
             raise SourcePolicyError(f"{label} repository is invalid; expected {path / marker}")
         return path
 
-    def _preflight(self, mode: str, *, strict: bool) -> None:
+    def _preflight(
+        self,
+        mode: str,
+        *,
+        strict: bool,
+        control: Mapping[str, Any] | None = None,
+    ) -> None:
         cfg = self.config
+        control = control or {}
         if mode == "test-pattern":
             return
         if mode == "weather":
@@ -364,13 +575,55 @@ class FrameRuntime:
                     raise SourcePolicyError("Starplot is not installed; install the integrations dependencies")
             return
         if mode == "uploaded-photo":
-            if cfg.photo_path is None or not cfg.photo_path.is_file():
+            if control.get("photo_enabled") is False:
+                raise SourcePolicyError("uploaded-photo is disabled in the control panel")
+            photo_path = self._photo_path(control)
+            if photo_path is None or not photo_path.is_file():
                 raise FileNotFoundError("sources.photo must point to an existing image")
             return
         raise RuntimeRenderError(f"no source adapter for mode {mode!r}")
 
-    def _context(self, when: datetime, *, allow_demo: bool) -> RenderContext:
+    def _context(
+        self,
+        when: datetime,
+        *,
+        allow_demo: bool,
+        control: Mapping[str, Any] | None = None,
+    ) -> RenderContext:
         cfg = self.config
+        control = control or {}
+        location = control.get("location")
+        if not isinstance(location, str) or not location.strip():
+            location = cfg.location
+        photo_path = self._photo_path(control)
+        weather_environment = control.get("weather_environment")
+        if not isinstance(weather_environment, str) or not weather_environment.strip():
+            weather_environment = cfg.weather_environment
+        enabled_environments = _string_tuple(control.get("enabled_environments"))
+        if (
+            enabled_environments
+            and weather_environment != "auto"
+            and weather_environment not in enabled_environments
+        ):
+            weather_environment = "auto"
+        weather_caption = control.get("weather_caption")
+        if not isinstance(weather_caption, bool):
+            weather_caption = cfg.weather_caption
+        weather_units = control.get("weather_units")
+        if weather_units not in ("imperial", "metric"):
+            weather_units = cfg.weather_units
+        photo_caption = control.get("photo_caption")
+        if not isinstance(photo_caption, str):
+            photo_caption = cfg.photo_caption
+        photo_rotation = control.get("photo_rotation")
+        if photo_rotation not in (0, 90, 180, 270):
+            photo_rotation = cfg.photo_rotation
+        recommendation_count = control.get("recommendation_count")
+        if not isinstance(recommendation_count, int) or isinstance(recommendation_count, bool):
+            recommendation_count = 5
+        minimum_suitability = control.get("minimum_suitability")
+        if isinstance(minimum_suitability, bool) or not isinstance(minimum_suitability, (int, float)):
+            minimum_suitability = 0.0
         settings_label = (
             f"dither={cfg.conversion.dither} · saturation={cfg.conversion.saturation:.2f} · "
             f"blue bias={cfg.conversion.blue_bias:.2f}"
@@ -378,7 +631,7 @@ class FrameRuntime:
         return RenderContext(
             orientation=cfg.orientation,
             when=when,
-            location=cfg.location,
+            location=location.strip(),
             config_path=cfg.config_path,
             offline=cfg.weather_offline,
             options={
@@ -388,7 +641,7 @@ class FrameRuntime:
                 "weather_repo": str(cfg.avian_weather_repo or ""),
                 "inkystarmap_repo": str(cfg.inkystarmap_repo or ""),
                 "starmap_source": str(cfg.starmap_source or ""),
-                "photo_path": str(cfg.photo_path or ""),
+                "photo_path": str(photo_path or ""),
                 "avian_python": str(cfg.avian_python or ""),
                 "allow_demo_fallback": allow_demo,
                 "use_inkystarmap": cfg.use_inkystarmap,
@@ -399,14 +652,20 @@ class FrameRuntime:
                 "timezone": cfg.timezone,
                 "weather_style": cfg.weather_style,
                 "weather_scene_source": cfg.weather_scene_source,
-                "weather_environment": cfg.weather_environment,
-                "weather_caption": cfg.weather_caption,
-                "weather_units": cfg.weather_units,
+                "weather_environment": weather_environment.strip(),
+                "enabled_environments": enabled_environments,
+                "enabled_activity_ids": _string_tuple(control.get("enabled_activity_ids")),
+                "activity_overrides": dict(_mapping(control.get("activity_overrides"))),
+                "recommendation_count": recommendation_count,
+                "minimum_suitability": float(minimum_suitability),
+                "weather_caption": weather_caption,
+                "weather_units": weather_units,
                 "country_code": cfg.weather_country_code,
                 "weather_timeout": cfg.weather_timeout,
                 "weather_condition": cfg.weather_condition,
-                "rotation": cfg.photo_rotation,
-                "caption": cfg.photo_caption,
+                "rotation": photo_rotation,
+                "caption": photo_caption,
+                "photo_enabled": control.get("photo_enabled", True) is not False,
                 "settings_label": settings_label,
             },
         )
@@ -519,14 +778,20 @@ class FrameRuntime:
         if requested == "automatic" and effective_allow_demo:
             raise SourcePolicyError("automatic mode never permits demo, fixture, sample, or fallback sources")
         strict = requested == "automatic" or not effective_allow_demo
-        self._preflight(mode, strict=strict)
+        control = self._control_settings()
+        self._preflight(mode, strict=strict, control=control)
 
         mode_directory = cfg.output_directory / mode
         frames_directory = mode_directory / "frames"
         current_path = mode_directory / "current.json"
         with _mode_lock(mode_directory):
             source = self.source_factories[mode]()
-            result = ImagePipeline().render(source, self._context(when, allow_demo=not strict), cfg.conversion, cfg.fit_mode)
+            result = ImagePipeline().render(
+                source,
+                self._context(when, allow_demo=not strict, control=control),
+                cfg.conversion,
+                cfg.fit_mode,
+            )
             provenance = self._provenance(mode, result.source_name)
             if strict and provenance not in ("live", "file") and mode != "test-pattern":
                 raise SourcePolicyError(
@@ -624,9 +889,10 @@ class FrameRuntime:
 
     def check(self) -> dict[str, Any]:
         readiness: dict[str, dict[str, Any]] = {}
+        control = self._control_settings()
         for mode in (*SCHEDULED_MODES, "uploaded-photo", "test-pattern"):
             try:
-                self._preflight(mode, strict=True)
+                self._preflight(mode, strict=True, control=control)
             except Exception as exc:
                 readiness[mode] = {"ready": False, "reason": str(exc)}
             else:
@@ -637,6 +903,12 @@ class FrameRuntime:
             "orientation": self.config.orientation.value,
             "timezone": self.config.timezone,
             "strict_sources": self.config.strict_sources,
+            "control_settings": {
+                "path": str(self.config.control_settings_path)
+                if self.config.control_settings_path
+                else None,
+                "loaded": bool(control),
+            },
             "headless": True,
             "ee02": {
                 "format": EE02_WIRE_FORMAT,

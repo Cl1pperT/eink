@@ -4,11 +4,11 @@
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include <esp_sleep.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/version.h>
 
 #include <cstring>
-#include <ctime>
 
 #include "device_config.h"
 #include "frame_contract.h"
@@ -17,6 +17,10 @@
 #include "secrets.h"
 #else
 #include "secrets.example.h"
+#endif
+
+#ifndef EINK_FRAME_AUTH_TOKEN
+#define EINK_FRAME_AUTH_TOKEN ""
 #endif
 
 #ifndef BOARD_HAS_PSRAM
@@ -32,18 +36,9 @@ static_assert(EPD_COLOR_DEPTH == 4,
 static_assert(TFT_WHITE == 0x0 && TFT_GREEN == 0x2 && TFT_RED == 0x6 &&
                   TFT_YELLOW == 0xB && TFT_BLUE == 0xD && TFT_BLACK == 0xF,
               "Seeed_GFX Setup510 color codes do not match the wire contract");
-static_assert(EINK_POLL_INTERVAL_MS > 0,
-              "EINK_POLL_INTERVAL_MS must be positive");
-static_assert(EINK_FORCE_RETRY_INTERVAL_MS > 0,
-              "EINK_FORCE_RETRY_INTERVAL_MS must be positive");
 static_assert(EINK_HTTP_READ_TIMEOUT_MS > 0 &&
                   EINK_HTTP_READ_TIMEOUT_MS <= 65535UL,
               "HTTPClient read timeout must fit its 16-bit millisecond API");
-static_assert(EINK_WEATHER_START_MINUTES >= 0 &&
-                  EINK_WEATHER_START_MINUTES < EINK_BIRDS_START_MINUTES &&
-                  EINK_BIRDS_START_MINUTES < EINK_STAR_MAP_START_MINUTES &&
-                  EINK_STAR_MAP_START_MINUTES < 24 * 60,
-              "automatic schedule boundaries must be ordered within one day");
 
 namespace {
 
@@ -52,20 +47,19 @@ constexpr char kPreferenceMode[] = "mode";
 constexpr char kPreferenceSha[] = "sha256";
 constexpr char kPreferenceEtag[] = "etag";
 constexpr char kPreferenceValid[] = "state-valid";
+constexpr gpio_num_t kButton1 = GPIO_NUM_2;
+constexpr gpio_num_t kButton2 = GPIO_NUM_3;
+constexpr gpio_num_t kButton3 = GPIO_NUM_5;
+constexpr uint64_t kButtonWakeMask =
+    (1ULL << kButton1) | (1ULL << kButton2) | (1ULL << kButton3);
 
 EPaper epaper;
 Preferences preferences;
 bool preferencesReady = false;
 
-String requestedMode = EINK_DEFAULT_MODE;
 String displayedMode;
 String displayedSha;
 String displayedEtag;
-uint32_t lastPollStarted = 0;
-bool pollImmediately = true;
-bool forceNextDownload = false;
-bool runtimeEnabled = false;
-bool timeServiceConfigured = false;
 bool panelInitialized = false;
 
 enum class SyncResult {
@@ -91,8 +85,7 @@ bool containsHttpUnsafeCharacters(const char *value) {
 bool configurationIsUsable() {
   const String wifiPassword(EINK_WIFI_PASSWORD);
   if (isPlaceholder(EINK_WIFI_SSID) ||
-      wifiPassword.startsWith("replace-with-") ||
-      isPlaceholder(EINK_FRAME_AUTH_TOKEN)) {
+      wifiPassword.startsWith("replace-with-")) {
     Serial.println("Configuration error: provision include/secrets.h");
     return false;
   }
@@ -114,61 +107,11 @@ bool configurationIsUsable() {
     Serial.println("Configuration error: provision the Pi http:// server URL");
     return false;
   }
-  if (requestedMode != "automatic" && !eink::isConcreteMode(requestedMode)) {
-    Serial.println("Configuration error: EINK_DEFAULT_MODE is invalid");
+  if (!eink::isConcreteMode(EINK_FRAME_MODE)) {
+    Serial.println("Configuration error: EINK_FRAME_MODE is invalid");
     return false;
   }
   return true;
-}
-
-bool clockIsSynchronized() {
-  // Earlier values indicate the ESP32's unset 1970 software clock.
-  return std::time(nullptr) >= 1704067200;
-}
-
-void configureNetworkTime() {
-  if (!timeServiceConfigured) {
-    configTzTime(EINK_POSIX_TIMEZONE, EINK_NTP_SERVER_1, EINK_NTP_SERVER_2);
-    timeServiceConfigured = true;
-  }
-}
-
-void waitBrieflyForClock() {
-  if (clockIsSynchronized()) {
-    return;
-  }
-  Serial.print("Waiting for network time");
-  const uint32_t started = millis();
-  while (!clockIsSynchronized() &&
-         !elapsed(started, EINK_NTP_SYNC_WAIT_MS)) {
-    Serial.print('.');
-    delay(250);
-  }
-  Serial.println();
-}
-
-String scheduledMode() {
-  const std::time_t now = std::time(nullptr);
-  std::tm local{};
-  if (now < 1704067200 || localtime_r(&now, &local) == nullptr) {
-    if (eink::isConcreteMode(displayedMode)) {
-      Serial.printf("Clock unavailable; retaining %s mode\n",
-                    displayedMode.c_str());
-      return displayedMode;
-    }
-    Serial.println("Clock unavailable; using weather until NTP synchronizes");
-    return "weather";
-  }
-
-  const int minuteOfDay = local.tm_hour * 60 + local.tm_min;
-  if (minuteOfDay >= EINK_STAR_MAP_START_MINUTES ||
-      minuteOfDay < EINK_WEATHER_START_MINUTES) {
-    return "star-map";
-  }
-  if (minuteOfDay >= EINK_BIRDS_START_MINUTES) {
-    return "birds";
-  }
-  return "weather";
 }
 
 bool displayBufferIsReady() {
@@ -381,8 +324,7 @@ bool refreshPanel(const uint8_t *verifiedFrame) {
   return true;
 }
 
-SyncResult syncFrame(const String &mode, bool force,
-                     bool bypassValidator = false) {
+SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
   if (!eink::isConcreteMode(mode)) {
     Serial.println("Refusing an unsupported frame mode");
     return SyncResult::kFailed;
@@ -410,11 +352,13 @@ SyncResult syncFrame(const String &mode, bool force,
     Serial.println("Could not initialize the HTTP request");
     return SyncResult::kFailed;
   }
-  http.addHeader("Authorization",
-                 String("Bearer ") + EINK_FRAME_AUTH_TOKEN);
+  if (EINK_FRAME_AUTH_TOKEN[0] != '\0') {
+    http.addHeader("Authorization",
+                   String("Bearer ") + EINK_FRAME_AUTH_TOKEN);
+  }
   http.addHeader("Accept", eink::kContentType);
   http.addHeader("Accept-Encoding", "identity");
-  if (!force && !bypassValidator && isLowercaseSha256(displayedSha) &&
+  if (!bypassValidator && isLowercaseSha256(displayedSha) &&
       displayedEtag == etagForSha(displayedSha)) {
     http.addHeader("If-None-Match", displayedEtag);
   }
@@ -430,7 +374,7 @@ SyncResult syncFrame(const String &mode, bool force,
     responseSha.trim();
     responseContentSha.trim();
     responseFormat.trim();
-    const bool validNotModified = !force && !bypassValidator &&
+    const bool validNotModified = !bypassValidator &&
                                   isLowercaseSha256(displayedSha) &&
                                   responseEtag == displayedEtag &&
                                   responseSha == displayedSha &&
@@ -439,8 +383,8 @@ SyncResult syncFrame(const String &mode, bool force,
     http.end();
     if (!validNotModified) {
       Serial.println("Invalid 304 response; retrying once without a validator");
-      if (!force && !bypassValidator) {
-        return syncFrame(mode, false, true);
+      if (!bypassValidator) {
+        return syncFrame(mode, true);
       }
       return SyncResult::kFailed;
     }
@@ -509,7 +453,7 @@ SyncResult syncFrame(const String &mode, bool force,
 
   // A compliant server returns 304 for this case. This second guard also
   // prevents a redundant physical refresh behind a proxy that returned 200.
-  if (!force && actualSha == displayedSha && etag == displayedEtag) {
+  if (actualSha == displayedSha && etag == displayedEtag) {
     heap_caps_free(staging);
     if (displayedMode != mode) {
       persistModeForUnchangedFrame(mode);
@@ -539,63 +483,57 @@ SyncResult syncFrame(const String &mode, bool force,
   return SyncResult::kUpdated;
 }
 
-void requestMode(const char *mode) {
-  requestedMode = mode;
-  forceNextDownload = false;
-  pollImmediately = true;
-  Serial.printf("Selected mode: %s\n", mode);
+bool anyButtonIsPressed() {
+  return digitalRead(kButton1) == LOW || digitalRead(kButton2) == LOW ||
+         digitalRead(kButton3) == LOW;
 }
 
-void handleSerialCommand() {
-  while (Serial.available() > 0) {
-    const char command = static_cast<char>(Serial.read());
-    switch (command) {
-      case 'a':
-        requestMode("automatic");
-        break;
-      case 'w':
-        requestMode("weather");
-        break;
-      case 'b':
-        requestMode("birds");
-        break;
-      case 's':
-        requestMode("star-map");
-        break;
-      case 'p':
-        requestMode("uploaded-photo");
-        break;
-      case 't':
-        requestMode("test-pattern");
-        break;
-      case 'r':
-        forceNextDownload = true;
-        pollImmediately = true;
-        Serial.println("A full frame download was requested");
-        break;
-      default:
-        break;
-    }
+void sleepUntilButton() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  if (preferencesReady) {
+    preferences.end();
+    preferencesReady = false;
   }
+
+  // A held active-low button would wake the ESP32 immediately. Wait for the
+  // press that started this run to be released before arming the next wake.
+  while (anyButtonIsPressed()) {
+    delay(10);
+  }
+
+  esp_sleep_enable_ext1_wakeup(kButtonWakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
+  Serial.println("Sleeping; press any user button to check for a new image");
+  Serial.flush();
+  delay(20);
+  esp_deep_sleep_start();
 }
 
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("EE02 network frame client starting");
-  Serial.println(
-      "Commands: a=automatic w=weather b=birds s=star-map p=photo t=test r=refresh");
+  pinMode(kButton1, INPUT_PULLUP);
+  pinMode(kButton2, INPUT_PULLUP);
+  pinMode(kButton3, INPUT_PULLUP);
+  delay(750);
+  Serial.println("EE02 button image updater starting");
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
+    Serial.println("Wake reason: user button");
+  } else {
+    Serial.println("Wake reason: power-on, reset, or upload");
+  }
 
   if (!psramFound()) {
     Serial.println("Fatal: EE02 firmware requires the XIAO ESP32S3 PSRAM target");
+    sleepUntilButton();
     return;
   }
   Serial.printf("Free PSRAM: %u bytes\n",
                 static_cast<unsigned>(ESP.getFreePsram()));
   if (!displayBufferIsReady()) {
     Serial.println("Fatal: Seeed_GFX did not allocate a 1200x1600 4bpp sprite");
+    sleepUntilButton();
     return;
   }
 
@@ -603,49 +541,19 @@ void setup() {
   if (!preferencesReady) {
     Serial.println(
         "Fatal: NVS is required for power-safe display checksum storage");
+    sleepUntilButton();
     return;
   }
   loadDisplayState();
 
   if (!configurationIsUsable()) {
+    sleepUntilButton();
     return;
   }
-  runtimeEnabled = true;
+  syncFrame(EINK_FRAME_MODE);
+  sleepUntilButton();
 }
 
 void loop() {
-  handleSerialCommand();
-  if (!runtimeEnabled) {
-    delay(100);
-    return;
-  }
-  const uint32_t pollInterval = forceNextDownload
-                                    ? EINK_FORCE_RETRY_INTERVAL_MS
-                                    : EINK_POLL_INTERVAL_MS;
-  if ((pollImmediately || elapsed(lastPollStarted, pollInterval)) &&
-      psramFound()) {
-    pollImmediately = false;
-    lastPollStarted = millis();
-    String effectiveMode = requestedMode;
-    bool networkReady = true;
-    if (requestedMode == "automatic") {
-      networkReady = connectWifi();
-      if (networkReady) {
-        configureNetworkTime();
-        waitBrieflyForClock();
-      }
-      effectiveMode = scheduledMode();
-    }
-    SyncResult result = SyncResult::kFailed;
-    if (networkReady) {
-      result = syncFrame(effectiveMode, forceNextDownload);
-    }
-    if (!forceNextDownload || result == SyncResult::kUpdated) {
-      forceNextDownload = false;
-    } else {
-      lastPollStarted = millis();
-      Serial.println("Forced refresh is still pending and will be retried");
-    }
-  }
-  delay(10);
+  delay(1000);
 }

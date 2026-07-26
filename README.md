@@ -65,6 +65,28 @@ python3 -m pip install -r requirements-simulator.txt
 python3 -m display_simulator
 ```
 
+## Phone control panel
+
+The same responsive control panel runs on macOS and Raspberry Pi. It manages
+which Utah locations and activities can appear, edits the weather ranges and
+estimated great days per year used by activity ranking, and accepts manual
+photo uploads. From the development checkout, start it with:
+
+```bash
+python3 -m display_control
+```
+
+Open the printed `http://<lan-address>:8765/` URL on a phone connected to the
+same trusted network. The simulator's **Start Phone Control Panel** button runs
+the same service and automatically previews a successful upload. A Raspberry
+Pi installation enables `eink-display-control.service` on port 8765; its
+access code is stored in `/etc/eink-display/control-panel.token`.
+
+Selections are a validated, atomic overlay rather than source-code edits. On
+the Pi they persist in `/var/lib/eink-display/control/settings.json`, separate
+from the root-owned runtime configuration. Do not forward port 8765 from your
+router; it is intended for a trusted home LAN.
+
 It generates 1600×1200 landscape or 1200×1600 portrait frames and never updates
 physical hardware. See [display_simulator/README.md](display_simulator/README.md)
 for setup, controls, offline mode, integrations, and limitations.

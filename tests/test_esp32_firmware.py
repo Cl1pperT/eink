@@ -78,16 +78,11 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertLess(invalidate_at, refresh_at)
         self.assertLess(refresh_at, persist_at)
 
-    def test_power_loss_marker_force_retry_and_bad_304_recovery_are_present(self):
+    def test_power_loss_marker_and_bad_304_recovery_are_present(self):
         self.assertIn('kPreferenceValid[] = "state-valid"', self.source)
         self.assertIn("preferences.putBool(kPreferenceValid, false)", self.source)
         self.assertIn("preferences.putBool(kPreferenceValid, true)", self.source)
-        self.assertIn("return syncFrame(mode, false, true);", self.source)
-        self.assertIn(
-            "if (!forceNextDownload || result == SyncResult::kUpdated)",
-            self.source,
-        )
-        self.assertIn("EINK_FORCE_RETRY_INTERVAL_MS", self.source)
+        self.assertIn("return syncFrame(mode, true);", self.source)
 
     def test_compile_time_guards_cover_psram_and_exact_driver_palette(self):
         self.assertIn("#ifndef BOARD_HAS_PSRAM", self.source)
@@ -106,14 +101,14 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertIn("containsHttpUnsafeCharacters(EINK_FRAME_AUTH_TOKEN)", self.source)
         self.assertIn("authority.indexOf('@')", self.source)
 
-    def test_automatic_schedule_matches_pi_boundaries(self):
-        self.assertIn('#define EINK_DEFAULT_MODE "automatic"', self.device_config)
-        self.assertIn("EINK_WEATHER_START_MINUTES 360", self.device_config)
-        self.assertIn("EINK_BIRDS_START_MINUTES 600", self.device_config)
-        self.assertIn("EINK_STAR_MAP_START_MINUTES 1200", self.device_config)
-        self.assertIn("configTzTime(", self.source)
-        self.assertIn("String scheduledMode()", self.source)
-        self.assertIn('requestMode("automatic")', self.source)
+    def test_each_user_button_wakes_one_check_then_deep_sleep(self):
+        self.assertIn('#define EINK_FRAME_MODE "uploaded-photo"', self.device_config)
+        for pin in ("GPIO_NUM_2", "GPIO_NUM_3", "GPIO_NUM_5"):
+            self.assertIn(pin, self.source)
+        self.assertIn("ESP_EXT1_WAKEUP_ANY_LOW", self.source)
+        self.assertIn("syncFrame(EINK_FRAME_MODE);", self.source)
+        self.assertIn("esp_deep_sleep_start();", self.source)
+        self.assertNotIn("EINK_POLL_INTERVAL_MS", self.source)
 
     def test_verified_bytes_are_copied_without_firmware_rotation(self):
         begin_at = self.source.index("epaper.begin();")
@@ -146,7 +141,7 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         example = (FIRMWARE / "include/secrets.example.h").read_text(
             encoding="utf-8"
         )
-        self.assertIn("replace-with-pi-frame-server-token", example)
+        self.assertIn('#define EINK_FRAME_AUTH_TOKEN ""', example)
         self.assertIn("replace-with-pi-address", example)
         self.assertNotIn(".local", example)
 

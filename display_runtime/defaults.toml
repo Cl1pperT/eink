@@ -1,6 +1,11 @@
 [runtime]
 strict_sources = true
 
+[control]
+# Leave blank to render only from this TOML file. The Raspberry Pi installer
+# points this at its writable control-panel state file.
+settings = ""
+
 [display]
 orientation = "landscape"
 fit_mode = "crop"
@@ -61,8 +66,8 @@ write_rgb = true
 [server]
 host = "0.0.0.0"
 port = 8787
-# Prefer DISPLAY_RUNTIME_AUTH_TOKEN in production so the secret is not stored
-# in this file. The server and simulated client refuse to run without a token.
+# Leave empty for read-only LAN access, or set the same bearer token on the
+# server and clients when authentication is desired.
 auth_token = ""
 chunk_size = 65536
 max_connections = 8

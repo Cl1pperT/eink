@@ -59,18 +59,12 @@ class ESP32ContractParityTests(unittest.TestCase):
         self.assertEqual(modes, set(CONCRETE_MODES))
         self.assertEqual(codes, set(EE02_NAMED_COLOR_CODES.values()))
 
-    def test_schedule_defaults_match_runtime_configuration(self):
-        schedule = self.defaults["schedule"]
-        pairs = (
-            ("EINK_WEATHER_START_MINUTES", schedule["weather_start"]),
-            ("EINK_BIRDS_START_MINUTES", schedule["birds_start"]),
-            ("EINK_STAR_MAP_START_MINUTES", schedule["star_start"]),
+    def test_button_updater_uses_a_concrete_server_mode(self):
+        mode = re.search(
+            r'#define\s+EINK_FRAME_MODE\s+"([^"]+)"', self.device_config
         )
-        for macro, configured_time in pairs:
-            match = re.search(rf"#define\s+{macro}\s+(\d+)", self.device_config)
-            self.assertIsNotNone(match, macro)
-            self.assertEqual(int(match.group(1)), _minutes(configured_time))
-        self.assertIn('#define EINK_DEFAULT_MODE "automatic"', self.device_config)
+        self.assertIsNotNone(mode)
+        self.assertIn(mode.group(1), CONCRETE_MODES)
 
     def test_etag_shape_matches_server(self):
         digest = "a" * 64

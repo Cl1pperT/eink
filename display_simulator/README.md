@@ -9,7 +9,7 @@ projects:
 | Morning | [Cl1pperT/AvianVisitors](https://github.com/Cl1pperT/AvianVisitors) | `weather_frame.renderer` generated-scene/procedural artwork |
 | Day | [Twarner491/AvianVisitors](https://github.com/Twarner491/AvianVisitors) | the real `frame/shoot.py` web-collage capture |
 | Night | [Marcel-Jan/inkystarmap](https://github.com/Marcel-Jan/inkystarmap) | its Starplot horizon-map recipe, without hardware initialization |
-| Manual | Built-in LAN upload page | uploaded Pillow-readable images |
+| Manual | Built-in phone control panel | uploaded Pillow-readable images |
 
 The upstream bird repository is named **AvianVisitors** (plural). It is a
 desktop-only tool: **it never imports display drivers, changes physical refresh
@@ -167,26 +167,37 @@ missing, its checked-in sample image is shown with an explicit diagnostic. All
 slow paths run in the rendering worker. A source checkout uses the astronomy
 catalogs stored at the repository root even when launched elsewhere.
 
-## LAN photo uploads
+## Phone control panel and photo uploads
 
-The Uploaded Photo section can start a tiny standard-library web server. It
-listens at the configured host and port (`0.0.0.0:8765` by default), shows a
-mobile-friendly upload form, limits request size, verifies the image with
-Pillow, removes EXIF orientation, and atomically stores an RGB PNG. A successful
-upload selects Uploaded Photo, records `Manual upload` as the wake reason, and
-generates a preview automatically.
+The Uploaded Photo section can start the same responsive control panel used by
+the Raspberry Pi. It listens at the configured host and port
+(`0.0.0.0:8765` by default) and lets a phone on the same LAN:
 
-You can also run the page independently:
+- enable the Utah locations that may rotate through weather scenes;
+- choose which outdoor activities may be recommended;
+- edit each activity's ideal/tolerable weather ranges, weights, required
+  conditions, and estimated great days per year;
+- adjust recommendation count, suitability threshold, caption, and units; and
+- upload and preview a PNG, JPEG, or WebP photo.
+
+The annual-day value affects rarity priority; it is an estimate, not a quota
+that stops an activity after that many displays. Settings and uploads are
+validated and atomically replaced. A successful simulator upload selects
+Uploaded Photo, records `Manual upload` as the wake reason, and generates a
+preview automatically.
+
+You can also run the panel independently:
 
 ```bash
-python3 -m display_simulator.upload_server --host 0.0.0.0 --port 8765
+python3 -m display_control
 ```
 
-The page has no authentication and is intended only for a trusted home LAN.
-Firewall or reverse-proxy authentication should be added before exposing it
-beyond that network. In the future physical system, the Pi can watch the saved
-`latest-upload.png` and publish the converted frame for the ESP32; this desktop
-simulator intentionally stops before any hardware update.
+The command prints a LAN URL. The Mac may ask for permission to accept incoming
+connections the first time. The default Mac settings file is stored beside the
+simulator's application data. An optional `--access-token` or
+`--access-token-file` protects changes; the Raspberry Pi service uses a token
+file by default. Keep the site on a trusted home LAN and do not expose port
+8765 through router forwarding.
 
 ## Configuration
 

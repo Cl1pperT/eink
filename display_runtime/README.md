@@ -29,7 +29,8 @@ are:
 /opt/eink-display/                  application, venv, browser
 /etc/eink-display/runtime.toml      operator configuration
 /etc/eink-display/frame-server.token
-/var/lib/eink-display/              atomic frames, cache, uploads
+/etc/eink-display/control-panel.token
+/var/lib/eink-display/              atomic frames, cache, uploads, phone settings
 ```
 
 Configuration, token, frame state, and external repositories are preserved on
@@ -58,6 +59,12 @@ adds Python requirements beyond this package's `integrations` extra, install
 them into `/opt/eink-display/.venv` and rerun `eink-display check` as the
 service account.
 
+The activity editor also loads the sibling `season` catalog. Keep that checkout
+beside AvianVisitors—for example `/opt/eink/AvianVisitors` and
+`/opt/eink/season`—so the control service can expose the complete activity
+list. It fails clearly at startup if the catalog is unavailable rather than
+showing an incomplete editor.
+
 Running the CLI directly from the full development checkout is more convenient:
 blank repository fields automatically discover `peacock/AvianVisitors` and
 `stars/integrations/inkystarmap` relative to the source tree. Explicit TOML
@@ -81,10 +88,23 @@ Check services, logs, and timers with:
 
 ```bash
 systemctl status eink-display-server.service
+systemctl status eink-display-control.service
 systemctl list-timers 'eink-display-*'
 journalctl -u eink-display-server.service
 journalctl -u 'eink-display-render@star-map.service'
 ```
+
+The installer also starts a phone-friendly configuration site on port 8765.
+Read its short access code with
+`sudo cat /etc/eink-display/control-panel.token`, then open
+`http://<pi-hostname-or-address>:8765/?token=<code>` on a phone on the same
+trusted LAN. The page removes the token from its address after storing it in
+that browser. It writes only
+`/var/lib/eink-display/control/settings.json` and
+`/var/lib/eink-display/uploads/latest.png`; it cannot rewrite the root-owned
+TOML. Render jobs reload the overlay each time, so changes apply to the next
+weather or uploaded-photo render. Do not expose port 8765 to the public
+internet.
 
 The installed timers render weather at 05:55, birds at 09:55, and the star map
 at 19:55 in the Pi's local timezone, which should match `location.timezone`.
@@ -161,9 +181,9 @@ a valid physical frame with convincing-looking fake data.
 
 ## HTTP frame server
 
-Create a long random bearer token and provide the same value to the Pi service
-and the ESP32. Prefer the environment variable so the secret is not stored in
-the TOML file or exposed in a process argument:
+By default, an empty `server.auth_token` provides public read-only access to
+frames on the LAN. To require authentication, create a bearer token and
+provide the same value to the Pi service and ESP32:
 
 ```bash
 export DISPLAY_RUNTIME_AUTH_TOKEN='<a-long-random-token>'
@@ -181,9 +201,9 @@ python3 -m display_runtime serve \
   --token-file /etc/eink-display/frame-server.token
 ```
 
-The file must contain a non-empty, single-line token. Restrict it to the service
-account (the installer uses root/service-group mode `0640`). The server refuses
-to start without a token and never accepts credentials in a URL or query string.
+When used, the file must contain a single-line token. Restrict it to the service
+account (the installer uses root/service-group mode `0640`). Credentials are
+never accepted in a URL or query string.
 
 The version 1 pull API supports `GET` and `HEAD`:
 

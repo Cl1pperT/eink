@@ -23,9 +23,10 @@ integrations = [
 
 [project.scripts]
 eink-display = "display_runtime.cli:main"
+eink-display-control = "display_control.server:main"
 
 [tool.setuptools.packages.find]
-include = ["display_runtime*", "display_simulator*"]
+include = ["display_control*", "display_runtime*", "display_simulator*"]
 
 [tool.setuptools.package-data]
 display_runtime = ["defaults.toml", "config.example.toml"]

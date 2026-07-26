@@ -2,6 +2,10 @@
 orientation = "landscape"
 physical_treatment = true
 
+[control]
+# Blank uses the control panel's normal per-user settings location.
+settings = ""
+
 [location]
 name = "Denver, Colorado"
 

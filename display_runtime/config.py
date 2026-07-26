@@ -22,6 +22,7 @@ class ConfigError(ValueError):
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:
     config_path: Path | None
+    control_settings_path: Path | None
     strict_sources: bool
     orientation: Orientation
     fit_mode: FitMode
@@ -188,6 +189,7 @@ def _landscape_rotation(value: Any) -> LandscapeRotation:
 def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
     base = path.parent if path else Path.cwd()
     runtime = data["runtime"]
+    control = data["control"]
     display = data["display"]
     location = data["location"]
     schedule_data = data["schedule"]
@@ -289,11 +291,10 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
     auth_token = os.environ.get("DISPLAY_RUNTIME_AUTH_TOKEN")
     if auth_token is None:
         auth_token = _string(server["auth_token"], "server.auth_token")
-    elif not auth_token:
-        raise ConfigError("DISPLAY_RUNTIME_AUTH_TOKEN must not be empty when it is set")
 
     return RuntimeConfig(
         config_path=path,
+        control_settings_path=_path(control["settings"], "control.settings", base),
         strict_sources=_boolean(runtime["strict_sources"], "runtime.strict_sources"),
         orientation=orientation,
         fit_mode=_fit_mode(display["fit_mode"]),
