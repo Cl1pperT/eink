@@ -118,6 +118,11 @@ malformed transient state is ignored, so the next device request returns to the
 validated saved mode or automatic schedule. This diagnostic selection is
 unrelated to `render --allow-demo` and cannot publish fixture content.
 
+Photo uploads are EXIF-oriented, color-managed to sRGB, and then converted with
+the photo-only `saturation` and `blue_bias` values under `[photo]` in
+`runtime.toml`. This keeps the stronger blue emphasis used by generated artwork
+from tinting camera-roll images.
+
 The installed timers render weather at 05:55, birds at 09:55, and the star map
 at 19:55 in the Pi's local timezone, which should match `location.timezone`.
 Each render starts five minutes before the ESP32's 06:00, 10:00, and 20:00

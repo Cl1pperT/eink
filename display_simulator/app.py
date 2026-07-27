@@ -5,6 +5,7 @@ import platform
 import queue
 import subprocess
 import tkinter as tk
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -414,6 +415,13 @@ class SimulatorApp:
             messagebox.showerror("Invalid simulator settings", str(exc))
             return
         settings = ConversionSettings(self.dither.get(), self.dither_method.get(), self.saturation.get(), self.blue_bias.get())
+        if mode == "Uploaded Photo":
+            photo_settings = self.config["photo"]
+            settings = replace(
+                settings,
+                saturation=float(photo_settings["saturation"]),
+                blue_bias=float(photo_settings["blue_bias"]),
+            )
         fit = FitMode(self.fit_mode.get())
         self._save_preferences()
         self.busy = True

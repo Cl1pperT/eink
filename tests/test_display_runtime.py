@@ -16,7 +16,7 @@ from display_runtime.config import ConfigError, load_runtime_config
 from display_runtime.ee02 import EE02_PAYLOAD_BYTES, LandscapeRotation
 from display_runtime.runtime import FrameRuntime, SourcePolicyError, parse_render_time
 from display_simulator.models import Orientation
-from display_simulator.pipeline import checksum_image, validate_palette
+from display_simulator.pipeline import ImagePipeline, checksum_image, validate_palette
 
 
 class SolidSource:
@@ -103,6 +103,16 @@ class RuntimeConfigTests(unittest.TestCase):
         utc = parse_render_time("2026-07-12T03:30:00Z", "America/Denver")
         self.assertEqual(naive.utcoffset(), utc.utcoffset())
         self.assertEqual(naive, utc)
+
+    def test_photo_conversion_is_separate_from_generated_art(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime.toml"
+            path.write_text("", encoding="utf-8")
+            config = load_runtime_config(path)
+            self.assertEqual(config.photo_conversion.saturation, 0.35)
+            self.assertEqual(config.photo_conversion.blue_bias, 0.0)
+            self.assertEqual(config.conversion.saturation, 0.6)
+            self.assertEqual(config.conversion.blue_bias, 0.5)
 
 
 class FrameRuntimeTests(unittest.TestCase):
@@ -237,6 +247,41 @@ class FrameRuntimeTests(unittest.TestCase):
             self.assertEqual(manifest["files"]["ee02_4bpp"]["bytes"], 960_000)
             self.assertEqual(manifest["source"]["provenance"], "synthetic")
             self.assertFalse(list(config.output_directory.rglob("*.tmp")))
+
+    def test_uploaded_photo_uses_photo_only_conversion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            photo = root / "photo.png"
+            Image.new("RGB", (40, 30), (30, 140, 210)).save(photo)
+            config = config_for(root, photo_path=photo)
+            seen = {}
+            original_render = ImagePipeline.render
+
+            def capture_settings(pipeline, source, context, settings, fit_mode):
+                seen[source.name] = settings
+                return original_render(
+                    pipeline,
+                    source,
+                    context,
+                    settings,
+                    fit_mode,
+                )
+
+            factories = {
+                "uploaded-photo": lambda: SolidSource(
+                    (30, 140, 210), "Uploaded Photo · test"
+                ),
+                "test-pattern": lambda: SolidSource(
+                    (30, 140, 210), "Test Pattern · test"
+                ),
+            }
+            with patch.object(ImagePipeline, "render", new=capture_settings):
+                runtime = FrameRuntime(config, source_factories=factories)
+                runtime.render("uploaded-photo")
+                runtime.render("test-pattern")
+
+            self.assertIs(seen["Uploaded Photo · test"], config.photo_conversion)
+            self.assertIs(seen["Test Pattern · test"], config.conversion)
 
     def test_portrait_commit_is_native_size(self):
         with tempfile.TemporaryDirectory() as directory:

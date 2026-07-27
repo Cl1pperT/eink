@@ -33,6 +33,7 @@ class RuntimeConfig:
     timezone: str
     schedule: ScheduleConfig
     conversion: ConversionSettings
+    photo_conversion: ConversionSettings
     landscape_rotation: LandscapeRotation
     output_directory: Path
     write_rgb: bool
@@ -249,6 +250,18 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
         saturation=saturation,
         blue_bias=blue_bias,
     )
+    photo_saturation = _number(photo["saturation"], "photo.saturation")
+    photo_blue_bias = _number(photo["blue_bias"], "photo.blue_bias")
+    if not 0 <= photo_saturation <= 1:
+        raise ConfigError("photo.saturation must be between 0 and 1")
+    if not 0 <= photo_blue_bias <= 1:
+        raise ConfigError("photo.blue_bias must be between 0 and 1")
+    photo_conversion_settings = ConversionSettings(
+        dither=conversion_settings.dither,
+        dither_method=conversion_settings.dither_method,
+        saturation=photo_saturation,
+        blue_bias=photo_blue_bias,
+    )
 
     output_directory = _path(output["directory"], "output.directory", base)
     if output_directory is None:
@@ -305,6 +318,7 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
         timezone=timezone,
         schedule=schedule,
         conversion=conversion_settings,
+        photo_conversion=photo_conversion_settings,
         landscape_rotation=_landscape_rotation(ee02["landscape_rotation"]),
         output_directory=output_directory,
         write_rgb=_boolean(output["write_rgb"], "output.write_rgb"),

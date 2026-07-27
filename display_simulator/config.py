@@ -15,6 +15,7 @@ DEFAULTS: dict[str, Any] = {
     "location": {"name": "Denver, Colorado"},
     "schedule": {"weather_start": "06:00", "birds_start": "10:00", "star_start": "20:00"},
     "conversion": {"dithering": True, "method": "floyd-steinberg", "saturation": 0.6, "blue_bias": 0.5},
+    "photo": {"saturation": 0.35, "blue_bias": 0.0},
     "repositories": {"avian_weather": "", "inkystarmap": ""},
     "sources": {"bird": "", "starmap": ""},
     "coordinates": {"latitude": 39.7392, "longitude": -104.9903, "direction": 180, "timezone": "America/Denver"},

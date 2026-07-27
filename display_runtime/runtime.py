@@ -927,10 +927,15 @@ class FrameRuntime:
         current_path = mode_directory / "current.json"
         with _mode_lock(mode_directory):
             source = self.source_factories[mode]()
+            conversion = (
+                cfg.photo_conversion
+                if mode == "uploaded-photo"
+                else cfg.conversion
+            )
             result = ImagePipeline().render(
                 source,
                 self._context(when, allow_demo=not strict, control=control),
-                cfg.conversion,
+                conversion,
                 cfg.fit_mode,
             )
             provenance = self._provenance(mode, result.source_name)

@@ -20,6 +20,11 @@ method = "floyd-steinberg"
 saturation = 0.6
 blue_bias = 0.5
 
+[photo]
+# Neutral settings for camera-roll images; generated art keeps [conversion].
+saturation = 0.35
+blue_bias = 0.0
+
 [repositories]
 avian_weather = ""
 inkystarmap = ""

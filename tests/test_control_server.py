@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageCms
 
 from display_control.demo import DemoOverrideStore
 from display_control.server import AsyncRuntimeRenderer, ControlServer, _runtime_config_values
@@ -311,6 +311,9 @@ class ControlServerTests(unittest.TestCase):
         with Image.open(self.server.photo_path) as saved:
             self.assertEqual(saved.mode, "RGB")
             self.assertEqual(saved.size, (17, 9))
+            self.assertEqual(saved.getpixel((0, 0)), (157, 163, 162))
+            profile = ImageCms.ImageCmsProfile(io.BytesIO(saved.info["icc_profile"]))
+            self.assertIn("sRGB", ImageCms.getProfileName(profile))
         status, headers, payload = self.request("GET", "/api/photo")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "image/png")

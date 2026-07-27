@@ -60,6 +60,10 @@ condition = "clear"
 [photo]
 rotation = 0
 caption = ""
+# Uploaded photos need neutral color matching. The stronger global blue bias is
+# retained for generated Weather, Birds, and Stars artwork.
+saturation = 0.35
+blue_bias = 0.0
 
 [output]
 directory = "runtime_output"

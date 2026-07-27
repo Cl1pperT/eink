@@ -184,7 +184,10 @@ The annual-day value affects rarity priority; it is an estimate, not a quota
 that stops an activity after that many displays. Settings and uploads are
 validated and atomically replaced. A successful simulator upload selects
 Uploaded Photo, records `Manual upload` as the wake reason, and generates a
-preview automatically.
+preview automatically. Embedded profiles such as iPhone Display P3 are
+converted to sRGB before palette matching. Uploaded photos use the separate
+neutral `[photo]` saturation and blue-bias settings; generated Weather, Birds,
+and Stars artwork continues to use `[conversion]`.
 
 You can also run the panel independently:
 

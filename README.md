@@ -71,10 +71,10 @@ python3 -m display_simulator
 The same responsive control panel runs on macOS and Raspberry Pi. It selects
 automatic/weather/birds/star-map/photo display modes, queues explicit renders,
 manages locations and activity recommendations, and turns phone photo uploads
-into committed frames. Its Birds tab includes a compact current-frame preview
-and a full responsive `/birds` gallery backed by cached, regional BirdWeather
-reports and the local AvianVisitors illustrations. From the development
-checkout, start it with:
+into color-managed, photo-tuned committed frames. Its Birds tab includes a
+compact current-frame preview and a full responsive `/birds` gallery backed by
+cached, regional BirdWeather reports and the local AvianVisitors illustrations.
+From the development checkout, start it with:
 
 ```bash
 python3 -m display_control

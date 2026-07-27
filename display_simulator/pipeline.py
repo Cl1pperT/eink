@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageChops, ImageEnhance, ImageOps
 
+from .color_management import convert_to_srgb
 from .models import ConversionSettings, FitMode, RenderContext, RenderResult
 
 
@@ -69,7 +70,7 @@ def apply_blue_bias(image: Image.Image, amount: float, saturation: float) -> Ima
 
 
 def normalize_source(image: Image.Image, size: tuple[int, int], fit_mode: FitMode = FitMode.CROP) -> Image.Image:
-    image = ImageOps.exif_transpose(image).convert("RGB")
+    image = convert_to_srgb(ImageOps.exif_transpose(image))
     if fit_mode is FitMode.CROP:
         return ImageOps.fit(image, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
     if fit_mode is FitMode.STRETCH:

@@ -1,14 +1,16 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageCms
 
+from display_simulator.color_management import convert_to_srgb
 from display_simulator.models import ConversionSettings, FitMode, Orientation, RenderContext
 from display_simulator.pipeline import (
     DRIVER_DESATURATED_PALETTE, DRIVER_SATURATED_PALETTE, ImagePipeline,
-    SPECTRA_PALETTE, checksum_image, driver_matching_palette, normalize_source,
-    validate_palette,
+    SPECTRA_PALETTE, apply_blue_bias, checksum_image, driver_matching_palette,
+    normalize_source, validate_palette,
 )
 
 
@@ -53,6 +55,28 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(driver_matching_palette(1), DRIVER_SATURATED_PALETTE)
         with self.assertRaises(ValueError):
             driver_matching_palette(1.1)
+
+    def test_zero_blue_bias_does_not_modify_photo_colors(self):
+        source = Image.new("RGB", (2, 1))
+        source.putdata(((12, 145, 220), (220, 120, 45)))
+        self.assertEqual(
+            apply_blue_bias(source, amount=0, saturation=0.45).tobytes(),
+            source.tobytes(),
+        )
+
+    def test_color_management_outputs_opaque_tagged_srgb(self):
+        source = Image.new("RGBA", (1, 1), (20, 40, 60, 100))
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+        source.info["icc_profile"] = profile.tobytes()
+
+        converted = convert_to_srgb(source)
+
+        self.assertEqual(converted.mode, "RGB")
+        self.assertEqual(converted.getpixel((0, 0)), (157, 163, 162))
+        output_profile = ImageCms.ImageCmsProfile(
+            io.BytesIO(converted.info["icc_profile"])
+        )
+        self.assertIn("sRGB", ImageCms.getProfileName(output_profile))
 
     def test_checksum_deterministic_and_dimension_sensitive(self):
         first = Image.new("RGB", (10, 10), "white")

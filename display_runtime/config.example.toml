@@ -65,6 +65,9 @@ condition = "clear"
 [photo]
 rotation = 0
 caption = ""
+# Photo-only palette matching. Generated modes continue to use [conversion].
+saturation = 0.35
+blue_bias = 0.0
 
 [output]
 directory = "/var/lib/eink-display/frames"

@@ -25,6 +25,8 @@ from urllib.parse import urlsplit
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from display_simulator.color_management import convert_to_srgb
+
 from .birds import BirdWeatherCache
 from .demo import DEMO_MODES, DemoOverrideError, DemoOverrideStore
 from .settings import (
@@ -179,7 +181,7 @@ INDEX_HTML = r"""<!doctype html>
     </section>
 
     <section id="panel-photo" class="panel" aria-labelledby="photo-title">
-      <div class="section-heading"><div><p class="eyebrow">Your artwork</p><h2 id="photo-title">Personal photo</h2><p>Upload from your camera roll. The original stays on your phone; the frame stores an optimized PNG.</p></div></div>
+      <div class="section-heading"><div><p class="eyebrow">Your artwork</p><h2 id="photo-title">Personal photo</h2><p>Upload from your camera roll. The frame color-manages the image and tunes it for the six physical inks.</p></div></div>
       <article class="card photo-card">
         <div id="photo-preview" class="photo-preview empty-preview"><span>▣</span><p>No photo uploaded yet</p></div>
         <label class="upload-button"><input id="photo-file" type="file" accept="image/png,image/jpeg,image/webp" hidden><span>↑</span><b>Choose a photo</b></label>
@@ -477,7 +479,7 @@ def _normalize_photo(payload: bytes, destination: Path) -> None:
                 raise ValueError("Image dimensions are too large")
             opened.verify()
         with Image.open(io.BytesIO(payload)) as opened:
-            image = ImageOps.exif_transpose(opened).convert("RGB")
+            image = convert_to_srgb(ImageOps.exif_transpose(opened))
             destination.parent.mkdir(parents=True, exist_ok=True)
             descriptor, temporary_name = tempfile.mkstemp(
                 prefix=destination.name + ".", suffix=".tmp", dir=destination.parent
@@ -485,7 +487,12 @@ def _normalize_photo(payload: bytes, destination: Path) -> None:
             os.close(descriptor)
             temporary = Path(temporary_name)
             try:
-                image.save(temporary, format="PNG", optimize=True)
+                image.save(
+                    temporary,
+                    format="PNG",
+                    optimize=True,
+                    icc_profile=image.info.get("icc_profile"),
+                )
                 temporary.replace(destination)
             finally:
                 try:
