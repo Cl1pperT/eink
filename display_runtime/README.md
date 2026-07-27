@@ -108,6 +108,16 @@ same shared scheduler lock as timer jobs, and the page reports completion or
 failure without blocking an HTTP request. Render jobs reload the overlay each
 time. Do not expose port 8765 to the public internet.
 
+The Overview page's **Five-minute demo** buttons temporarily select the latest
+committed Weather, Birds, Stars, or uploaded Image artifact. The authenticated
+action writes a fixed-duration UTC sidecar at
+`/var/lib/eink-display/control/demo-override.json`; it does not modify
+`settings.json`, and the browser cannot choose a longer duration. Press the
+ESP32's physical button to see the selection immediately. Expired, absent, or
+malformed transient state is ignored, so the next device request returns to the
+validated saved mode or automatic schedule. This diagnostic selection is
+unrelated to `render --allow-demo` and cannot publish fixture content.
+
 The installed timers render weather at 05:55, birds at 09:55, and the star map
 at 19:55 in the Pi's local timezone, which should match `location.timezone`.
 Each render starts five minutes before the ESP32's 06:00, 10:00, and 20:00
@@ -217,10 +227,12 @@ The version 1 pull API supports `GET` and `HEAD`:
 | `/v1/frame/<mode>/<sha256>` | Bearer token | Immutable, content-addressed EE02 payload |
 
 `active` is a virtual `<mode>` for the current manifest and frame endpoints.
-It resolves on every request from validated phone settings: a manual selection
-maps directly to its concrete artifact, while `automatic` uses the configured
-timezone and schedule. Responses include `X-Resolved-Mode`. Invalid settings
-or resolver failures receive `503`, and a selected mode with no committed
+It resolves on every request from validated phone settings. An unexpired
+five-minute diagnostic override wins temporarily; otherwise a saved manual
+selection maps directly to its concrete artifact and `automatic` uses the
+configured timezone and schedule. Responses include `X-Resolved-Mode`.
+Invalid persistent settings or resolver failures receive `503`, invalid or
+expired transient overrides are ignored, and a selected mode with no committed
 artifact receives `404`, so the ESP retains its current image.
 
 Send the token as `Authorization: Bearer <token>`. Missing or incorrect

@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .birds import BirdWeatherCache
+from .demo import DEMO_MODES, DemoOverrideError, DemoOverrideStore
 from .settings import (
     Catalog,
     SCHEMA_VERSION,
@@ -41,7 +42,7 @@ MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_PIXELS = 80_000_000
 MAX_PREVIEW_BYTES = 40 * 1024 * 1024
 MAX_ILLUSTRATION_BYTES = 16 * 1024 * 1024
-RENDERABLE_MODES = frozenset(("weather", "birds", "star-map", "uploaded-photo"))
+RENDERABLE_MODES = DEMO_MODES
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _BIRD_PNG_RE = re.compile(r"frames/[0-9a-f]{64}(?:\.rgb)?\.png")
 _BIRD_SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?")
@@ -88,6 +89,25 @@ INDEX_HTML = r"""<!doctype html>
         <article class="stat"><span class="stat-icon sun">☀</span><strong id="activity-count">—</strong><small>activities considered</small></article>
         <article class="stat"><span class="stat-icon photo">▣</span><strong id="photo-state">—</strong><small>personal photo</small></article>
       </div>
+
+      <article class="card demo-card" aria-labelledby="demo-title">
+        <div class="card-title">
+          <div><p class="eyebrow">Diagnostic preview</p><h3 id="demo-title">Five-minute demo</h3></div>
+          <span id="demo-status" class="demo-badge">Automatic</span>
+        </div>
+        <p class="muted demo-intro">Temporarily choose the latest saved artwork. Press the physical button on the frame to show it now; no schedule setting is changed.</p>
+        <div class="demo-grid" role="group" aria-label="Choose five-minute demo artwork">
+          <button class="demo-option" type="button" data-demo-mode="weather"><span aria-hidden="true">☀</span><b>Weather</b><small>Forecast artwork</small></button>
+          <button class="demo-option" type="button" data-demo-mode="birds"><span aria-hidden="true">♩</span><b>Birds</b><small>Avian visitors</small></button>
+          <button class="demo-option" type="button" data-demo-mode="star-map"><span aria-hidden="true">✦</span><b>Stars</b><small>Tonight's sky</small></button>
+          <button id="demo-image" class="demo-option" type="button" data-demo-mode="uploaded-photo"><span aria-hidden="true">▣</span><b>Image</b><small>Uploaded photo</small></button>
+        </div>
+        <div id="demo-active" class="demo-active hidden" aria-live="polite">
+          <div><b id="demo-active-title">Demo active</b><small id="demo-countdown" role="timer">5:00 remaining</small></div>
+          <button id="demo-cancel" class="demo-cancel" type="button">End demo</button>
+        </div>
+        <p id="demo-note" class="helper">After five minutes, the next button press or automatic device check returns to your normal display setting.</p>
+      </article>
 
       <article class="card">
         <div class="card-title"><div><p class="eyebrow">Forecast basics</p><h3>What the frame displays</h3></div></div>
@@ -191,8 +211,9 @@ APP_CSS = r"""
 *{box-sizing:border-box}body{margin:0;min-width:320px;background:radial-gradient(circle at 95% 4%,#e3d6ae88 0,transparent 25rem),linear-gradient(180deg,#eef3e9 0,var(--paper) 24rem);min-height:100vh}button,input,select{font:inherit;color:inherit}.hero{max-width:1040px;margin:auto;padding:calc(22px + env(safe-area-inset-top)) 22px 18px;display:flex;align-items:center;gap:13px}.brand-mark{width:45px;height:45px;border-radius:15px;background:var(--forest);color:white;display:grid;place-items:center;font-size:26px;box-shadow:0 7px 18px #1d514533}.hero-copy{flex:1}.hero h1,.section-heading h2,.card h3{margin:0;line-height:1.1}.hero h1{font-size:clamp(24px,6vw,34px);letter-spacing:-.04em}.eyebrow{text-transform:uppercase;font-size:10px;letter-spacing:.15em;font-weight:800;color:#6b7e68;margin:0 0 5px}.pill{border:1px solid #b8c8b7;background:#ffffffb3;padding:8px 11px;border-radius:99px;font-size:12px;font-weight:750;white-space:nowrap}.pill i,.save-bar i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:#d7a12e}.pill.online i{background:#4b9a65}.pill.offline i{background:var(--red)}main{max-width:1040px;margin:auto;padding:0 18px 130px}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:5px;border:1px solid #dce1d5;background:#f9fbf5cc;backdrop-filter:blur(12px);border-radius:17px;position:sticky;top:8px;z-index:10;box-shadow:0 3px 18px #28482c0a}.tab{appearance:none;border:0;background:transparent;border-radius:12px;padding:10px 4px;color:#6c7a6e;font-size:11px;font-weight:700;cursor:pointer}.tab span{display:block;font-size:19px;height:23px}.tab.active{background:var(--forest);color:#fff;box-shadow:0 4px 12px #214c4133}.panel{display:none;animation:fade .2s ease}.panel.active{display:block}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:30px 3px 18px}.section-heading h2{font-family:Georgia,serif;font-weight:500;font-size:clamp(27px,7vw,38px);letter-spacing:-.03em}.section-heading p:not(.eyebrow){color:#69776d;line-height:1.45;margin:8px 0 0;max-width:640px}.icon-button{border:1px solid var(--line);background:var(--white);border-radius:50%;width:43px;height:43px;font-size:22px;cursor:pointer}.card,.stat,.location-card,.activity-item{background:rgba(255,253,248,.94);border:1px solid rgba(130,143,118,.23);border-radius:21px;box-shadow:var(--shadow)}.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}.stat{padding:17px 14px;min-width:0}.stat strong{display:block;font-size:25px;margin:10px 0 2px;letter-spacing:-.04em}.stat small{color:#728074;display:block;line-height:1.2}.stat-icon{width:32px;height:32px;display:grid;place-items:center;border-radius:10px;background:#e8eee4;color:var(--forest);font-size:18px}.stat-icon.sun{background:#f7e7c4;color:#a66b15}.stat-icon.photo{background:#e7e4ef;color:#645b7a}.card{padding:20px;margin:14px 0}.card.compact{padding:17px}.card-title{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px}.card h3{font-size:19px}.success-dot{width:10px;height:10px;border-radius:50%;background:#5b9d68;box-shadow:0 0 0 6px #5b9d6818}.field-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px}.field{display:flex;flex-direction:column;gap:7px;font-size:13px;font-weight:750}.field.span-2{grid-column:span 2}.field input:not([type=range]),.field select,.search{width:100%;border:1px solid #ccd4c8;background:#fff;border-radius:12px;min-height:47px;padding:10px 12px;outline:none}.field input:focus,.field select:focus,.search:focus-within{border-color:#5e887a;box-shadow:0 0 0 3px #5385741b}.field output{float:right;color:var(--forest)}input[type=range]{accent-color:var(--forest);width:100%;height:28px}.switch-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:4px 0}.switch-row span{display:flex;flex-direction:column;gap:3px}.switch-row small,.helper,.muted,.file-name{color:#728074;line-height:1.45}.switch-row input[type=checkbox]{appearance:none;width:48px;height:28px;border-radius:99px;background:#cbd1c8;position:relative;transition:.2s;flex:none}.switch-row input[type=checkbox]::after{content:"";position:absolute;width:22px;height:22px;left:3px;top:3px;border-radius:50%;background:#fff;box-shadow:0 2px 5px #0003;transition:.2s}.switch-row input:checked{background:var(--forest)}.switch-row input:checked::after{transform:translateX(20px)}.field-switch{align-self:end;min-height:47px}.helper{font-size:12px;margin:15px 0 0;border-left:3px solid #d6bd7b;padding-left:11px}.location-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.location-card{position:relative;overflow:hidden;cursor:pointer;min-height:190px;display:flex;flex-direction:column;justify-content:flex-end;padding:18px;isolation:isolate;transition:.18s}.location-card::before{content:"";position:absolute;inset:0;z-index:-2;background:linear-gradient(160deg,var(--scene-a),var(--scene-b))}.location-card::after{content:"";position:absolute;z-index:-1;inset:42% -12% -23%;background:var(--mountain);clip-path:polygon(0 58%,15% 30%,31% 57%,47% 8%,65% 45%,80% 24%,100% 53%,100% 100%,0 100%);opacity:.68}.location-card input{position:absolute;right:14px;top:14px;width:25px;height:25px;accent-color:var(--forest)}.location-card h3{margin:0 38px 4px 0;font-size:19px}.location-card p{font-size:12px;line-height:1.35;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.location-card.selected{outline:3px solid var(--forest);outline-offset:-3px}.location-card:not(.selected){filter:saturate(.55);opacity:.68}.location-card .art-badge{position:absolute;left:14px;top:14px;font-size:10px;font-weight:800;padding:5px 7px;border-radius:99px;background:#ffffffb8}.activity-toolbar{display:flex;align-items:center;gap:12px;position:sticky;top:83px;z-index:8}.search{display:flex;align-items:center;gap:8px;flex:1;min-height:44px;padding:6px 11px}.search input{border:0;outline:0;background:transparent;width:100%}.text-button{border:0;background:transparent;color:var(--forest);font-weight:800;padding:9px 7px;cursor:pointer}.list-summary{font-size:12px;color:#728074;margin:15px 4px 9px}.activity-list{display:grid;gap:10px}.activity-item{overflow:hidden}.activity-head{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:15px}.activity-toggle{width:23px;height:23px;accent-color:var(--forest)}.activity-title b{display:block}.activity-title small{color:#748075}.art-chip{font-size:10px;background:#e8eee4;color:#346051;padding:5px 7px;border-radius:99px;font-weight:800}.activity-item details{border-top:1px solid #e5e7dd}.activity-item summary{list-style:none;padding:12px 15px;cursor:pointer;color:var(--forest);font-size:12px;font-weight:800}.activity-item summary::-webkit-details-marker{display:none}.activity-item summary::after{content:"+";float:right;font-size:18px;line-height:12px}.activity-item details[open] summary::after{content:"−"}.activity-editor{padding:4px 15px 18px}.days-row{display:grid;grid-template-columns:1fr 100px;align-items:end;gap:10px;margin-bottom:15px}.metric-table{overflow-x:auto;border:1px solid #e0e3d9;border-radius:13px}.metric-head,.metric-row{display:grid;grid-template-columns:minmax(122px,1.5fr) repeat(5,minmax(66px,.7fr)) 62px;align-items:center;min-width:580px}.metric-head{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:#718075;background:#f1f3ec;padding:8px}.metric-row{border-top:1px solid #e5e7df;padding:8px;background:#fff}.metric-row:first-of-type{border-top:0}.metric-name{font-size:11px;font-weight:750}.metric-row input[type=number]{width:60px;border:1px solid #d8ddd3;border-radius:8px;padding:7px 5px;font-size:12px}.metric-required{text-align:center}.metric-required input{width:18px;height:18px;accent-color:var(--forest)}.restore-activity{margin-top:12px}.photo-card{text-align:center}.photo-preview{aspect-ratio:4/3;border-radius:15px;overflow:hidden;background:#e9ece4;display:grid;place-items:center;margin-bottom:16px;border:1px dashed #b9c2b5}.photo-preview img{width:100%;height:100%;object-fit:cover}.empty-preview span{font-size:37px;color:#788b79}.empty-preview p{margin:-25% 0 0;color:#718074;font-size:13px}.upload-button{display:flex;justify-content:center;align-items:center;gap:9px;background:var(--forest);color:#fff;border-radius:13px;padding:13px;cursor:pointer}.upload-button span{font-size:20px}.file-name{font-size:12px;margin:10px 0 0}.photo-fields{margin-top:18px;padding-top:17px;border-top:1px solid #e4e6dc}.notice{border-radius:13px;padding:13px 15px;background:#e6eee2;color:#315742}.notice.error{background:#f6e2dc;color:#7f372a}.loading-card,.empty{text-align:center;padding:50px 20px;color:#68766b}.spinner{display:inline-block;width:24px;height:24px;border:3px solid #cfdbcd;border-top-color:var(--forest);border-radius:50%;animation:spin .8s linear infinite}.save-bar{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(calc(100% - 24px),720px);background:#173b35;color:#fff;border-radius:18px;padding:10px 11px 10px 16px;display:flex;align-items:center;gap:9px;box-shadow:0 15px 35px #102e2770}.save-bar span{margin-right:auto;font-size:13px}.save-bar i{background:var(--sun)}.primary-button,.secondary-button{border:0;border-radius:11px;padding:10px 13px;font-weight:800;cursor:pointer}.primary-button{background:#fff;color:var(--forest)}.secondary-button{background:#ffffff18;color:#fff}.danger-link{border:0;background:transparent;color:#9b5546;font-weight:700;cursor:pointer}footer{max-width:1040px;margin:-92px auto 0;padding:20px 20px calc(30px + env(safe-area-inset-bottom));display:flex;justify-content:space-between;color:#899287;font-size:11px}.toast{position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:50;background:#173b35;color:#fff;border-radius:12px;padding:11px 16px;box-shadow:var(--shadow);font-size:13px}.hidden{display:none!important}@keyframes spin{to{transform:rotate(360deg)}}@keyframes fade{from{opacity:0;transform:translateY(4px)}}
 .location-card.scene-0{--scene-a:#b9d7d4;--scene-b:#728b68;--mountain:#4b6952}.location-card.scene-1{--scene-a:#efc18c;--scene-b:#be674a;--mountain:#71423a}.location-card.scene-2{--scene-a:#e9b598;--scene-b:#a95842;--mountain:#6e473e}.location-card.scene-3{--scene-a:#bdd7dc;--scene-b:#728d87;--mountain:#496c63}.location-card.scene-4{--scene-a:#a8d9d6;--scene-b:#789a91;--mountain:#4b7068}.toast.error{background:#843c31}
 .tabs{grid-template-columns:repeat(5,1fr)}.card-title{gap:12px}.render-row{display:flex;align-items:center;gap:16px;margin-top:17px;padding-top:15px;border-top:1px solid #e4e6dc}.render-row p{margin:0;flex:1;font-size:12px}.inline-primary,.gallery-link{border:0;border-radius:12px;background:var(--forest);color:#fff;font-weight:800;text-decoration:none;padding:11px 14px;cursor:pointer;white-space:nowrap}.inline-primary:disabled{opacity:.45;cursor:not-allowed}.bird-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(260px,.85fr);gap:20px}.bird-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:linear-gradient(145deg,#e8eee4,#d5dfd1);display:grid;place-items:center;border:1px solid #d5dccf}.bird-preview-shell>*{grid-area:1/1}.bird-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.bird-preview-empty{text-align:center;color:#6d7c70;padding:20px}.bird-preview-empty span{display:block;font-size:42px;margin-bottom:8px}.bird-preview-empty p{font-size:12px;line-height:1.4;margin:0}.bird-mini-copy{align-self:center}.freshness,.provider-chip{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;font-size:9px;letter-spacing:.08em;font-weight:850;white-space:nowrap}.freshness{background:#e4eee3;color:#356246}.freshness.stale{background:#f3e4c8;color:#855b19}.freshness.loading{background:#e9e7df;color:#6d7069}.freshness.unavailable{background:#f4dfda;color:#843c31}.provider-chip{background:#e8eee4;color:#346051}.bird-mini-list{list-style:none;padding:0;margin:12px 0 18px;display:grid;gap:8px}.bird-mini-list li{display:grid;grid-template-columns:1fr auto;gap:10px;border-bottom:1px solid #e5e7df;padding:0 0 8px;font-size:13px}.bird-mini-list b{font-weight:750}.bird-mini-list span{color:#718075;font-size:11px}.gallery-link{display:inline-flex;align-items:center;justify-content:space-between;gap:18px}.gallery-link span{font-size:18px}
+.demo-intro{font-size:13px;margin:-4px 0 16px}.demo-badge{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;background:#e9e7df;color:#6d7069;font-size:9px;letter-spacing:.08em;font-weight:850;text-transform:uppercase;white-space:nowrap}.demo-badge.active{background:#f4dfaa;color:#795612}.demo-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.demo-option{appearance:none;border:1px solid #d8ddd2;border-radius:15px;background:#fbfcf8;min-height:105px;padding:13px 9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;transition:.18s}.demo-option span{font-size:25px;color:var(--forest);line-height:1}.demo-option b{font-size:13px}.demo-option small{font-size:10px;color:#748075}.demo-option:hover{border-color:#7c9a8b;transform:translateY(-1px)}.demo-option.active{background:var(--forest);border-color:var(--forest);color:#fff;box-shadow:0 6px 16px #1d514533}.demo-option.active span,.demo-option.active small{color:#fff}.demo-option:disabled{opacity:.42;cursor:not-allowed;transform:none}.demo-active{margin-top:13px;border-radius:14px;background:#f5e8c7;padding:12px 13px;display:flex;align-items:center;gap:12px}.demo-active div{display:flex;flex-direction:column;gap:2px;flex:1}.demo-active small{color:#78633d;font-variant-numeric:tabular-nums}.demo-cancel{border:1px solid #c9aa68;background:#fff9eb;border-radius:10px;padding:8px 10px;font-size:11px;font-weight:800;cursor:pointer}.demo-cancel:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:640px){.hero{padding-left:17px;padding-right:17px}.pill{font-size:0;padding:9px}.pill i{margin:0}.hero-copy .eyebrow{font-size:9px}.stat-grid{gap:7px}.stat{padding:13px 11px}.stat strong{font-size:21px}.stat small{font-size:10px}.field-grid{grid-template-columns:1fr}.field.span-2{grid-column:auto}.field-switch{margin-top:4px}.location-grid{grid-template-columns:1fr}.location-card{min-height:155px}.activity-toolbar{top:78px;margin-left:-3px;margin-right:-3px}.save-bar{padding-left:13px}.save-bar span b{display:none}.secondary-button{padding-left:8px;padding-right:8px}.metric-head,.metric-row{grid-template-columns:122px repeat(5,66px) 62px}}
-@media(max-width:700px){.tab{font-size:9px}.tab span{font-size:17px}.bird-mini{grid-template-columns:1fr}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}}
+@media(max-width:700px){.tab{font-size:9px}.tab span{font-size:17px}.bird-mini{grid-template-columns:1fr}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}.demo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.demo-option{min-height:96px}}
 @media(min-width:780px){.tabs{width:650px}.panel{padding-top:5px}.photo-card{display:grid;grid-template-columns:1.25fr .75fr;gap:18px;align-items:center}.photo-preview{grid-row:span 2;margin:0}.location-grid{grid-template-columns:repeat(3,1fr)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 """
@@ -203,7 +224,8 @@ APP_JS = r"""
   const $ = (selector, root=document) => root.querySelector(selector);
   const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
   const metricNames = {temperature_f:'Temperature °F',precipitation_chance:'Precipitation %',snowpack_inches:'Snowpack in',uv_index:'UV index',wind_mph:'Wind mph',visibility_miles:'Visibility mi',air_quality_index:'Air quality'};
-  let catalog=null, settings=null, baseline='', photoAvailable=false, token='', birdSummaryTimer=null, renderPollTimer=null;
+  const demoLabels={weather:'Weather',birds:'Birds','star-map':'Stars','uploaded-photo':'Image'};
+  let catalog=null, settings=null, baseline='', photoAvailable=false, token='', birdSummaryTimer=null, renderPollTimer=null, demoState=null, demoDeadline=0, demoTimer=null, demoBusy=false;
 
   function acquireToken(){
     const url=new URL(location.href); const supplied=url.searchParams.get('token');
@@ -293,6 +315,37 @@ APP_JS = r"""
     const button=$('#render-selected');if(!button||!settings)return;const automatic=settings.display.mode==='automatic';
     button.disabled=automatic;button.textContent=automatic?'Automatic follows schedule':'Render selected now';
   }
+  function demoClock(seconds){const value=Math.max(0,Number(seconds)||0),minutes=Math.floor(value/60),remainder=String(value%60).padStart(2,'0');return `${minutes}:${remainder} remaining`}
+  function renderDemo(){
+    const active=Boolean(demoState&&demoState.active),activeMode=active?demoState.mode:null;
+    $$('[data-demo-mode]').forEach(button=>{const mode=button.dataset.demoMode;button.classList.toggle('active',mode===activeMode);button.disabled=demoBusy||(mode==='uploaded-photo'&&!photoAvailable);button.setAttribute('aria-pressed',String(mode===activeMode))});
+    const badge=$('#demo-status'),row=$('#demo-active');badge.textContent=active?'Demo active':'Automatic';badge.className=`demo-badge${active?' active':''}`;row.classList.toggle('hidden',!active);$('#demo-cancel').disabled=demoBusy;
+    if(active){$('#demo-active-title').textContent=`${demoLabels[activeMode]} selected`;$('#demo-countdown').textContent=demoClock(demoState.remaining_seconds);$('#demo-note').textContent='Press the physical frame button now. When the timer ends, the next refresh resumes your normal display setting.'}
+    else{$('#demo-note').textContent='After five minutes, the next button press or automatic device check returns to your normal display setting.'}
+    $('#demo-image').title=photoAvailable?'Show the uploaded image for five minutes':'Upload an image first';
+  }
+  function tickDemo(){
+    if(!demoState||!demoState.active)return;const remaining=Math.max(0,Math.ceil((demoDeadline-Date.now())/1000));demoState={...demoState,remaining_seconds:remaining};
+    if(remaining===0){clearInterval(demoTimer);demoTimer=null;demoState={active:false,mode:null,remaining_seconds:0};demoDeadline=0;renderDemo();setTimeout(loadDemo,300);return}
+    renderDemo();
+  }
+  function applyDemoState(value){
+    clearInterval(demoTimer);demoTimer=null;demoState=value;demoDeadline=value.active?Date.now()+Math.max(0,Number(value.remaining_seconds)||0)*1000:0;renderDemo();
+    if(value.active)demoTimer=setInterval(tickDemo,1000);
+  }
+  async function loadDemo(){try{applyDemoState(await api('/api/demo'))}catch(error){toast(`Demo status unavailable: ${error.message}`,true)}}
+  async function startDemo(mode){
+    if(demoBusy)return;if(mode==='uploaded-photo'&&!photoAvailable){toast('Upload an image first',true);return}demoBusy=true;renderDemo();
+    try{const value=await api('/api/demo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});applyDemoState(value);toast(`${demoLabels[mode]} demo active · press the frame button`)}
+    catch(error){toast(error.message,true)}
+    finally{demoBusy=false;renderDemo()}
+  }
+  async function cancelDemo(){
+    if(demoBusy)return;demoBusy=true;renderDemo();
+    try{applyDemoState(await api('/api/demo',{method:'DELETE'}));toast('Demo ended · normal display restored')}
+    catch(error){toast(error.message,true)}
+    finally{demoBusy=false;renderDemo()}
+  }
   function renderBirdSummary(data){
     const badge=$('#bird-freshness');badge.textContent=data.freshness==='fresh'?'Fresh':data.freshness==='stale'?'Saved copy':data.freshness==='loading'?'Loading':'Unavailable';badge.className=`freshness ${data.freshness}`;
     const where=`${data.postal_code.toUpperCase()} · past ${data.lookback_days} day${data.lookback_days===1?'':'s'}`;
@@ -326,18 +379,19 @@ APP_JS = r"""
   async function resetAll(){if(!confirm('Restore every location, activity, and display setting to its default? Your uploaded photo will not be deleted.'))return;try{settings=await api('/api/settings/reset',{method:'POST'});baseline=snapshot();renderAll();toast('Defaults restored')}catch(error){toast(error.message,true)}}
   async function uploadPhoto(file){
     if(!file)return;$('#photo-filename').textContent=file.name;const notice=$('#upload-progress');notice.textContent='Preparing and uploading photo…';notice.classList.remove('hidden','error');
-    try{settings.photo.enabled=true;await save(false);const body=new FormData();body.append('photo',file);const result=await api('/api/photo',{method:'POST',body});photoAvailable=true;renderPhoto();updateStats();notice.textContent=result.render_configured?(result.render_queued?'Photo uploaded. Its frame render has been queued.':'Photo uploaded. A frame render is already queued.'):'Photo uploaded successfully.';toast(result.render_configured?'Photo uploaded · render queued':'Photo uploaded');if(result.render_configured)pollRender('uploaded-photo')}
+    try{settings.photo.enabled=true;await save(false);const body=new FormData();body.append('photo',file);const result=await api('/api/photo',{method:'POST',body});photoAvailable=true;renderPhoto();renderDemo();updateStats();notice.textContent=result.render_configured?(result.render_queued?'Photo uploaded. Its frame render has been queued.':'Photo uploaded. A frame render is already queued.'):'Photo uploaded successfully.';toast(result.render_configured?'Photo uploaded · render queued':'Photo uploaded');if(result.render_configured)pollRender('uploaded-photo')}
     catch(error){notice.textContent=error.message;notice.classList.add('error');toast(error.message,true)}
   }
-  function renderAll(){bindBasics();renderLocations();renderActivities();renderPhoto();updateStats();setDirty()}
+  function renderAll(){bindBasics();renderLocations();renderActivities();renderPhoto();renderDemo();updateStats();setDirty()}
   async function load(){
     $('#loading').classList.remove('hidden');$('#fatal').classList.add('hidden');
-    try{const [cat,stored,health]=await Promise.all([api('/api/catalog'),api('/api/settings'),api('/healthz')]);catalog=cat;settings=stored;photoAvailable=Boolean(health.photo_available);baseline=snapshot();renderAll();loadBirdSummary();$('#connection-pill').className='pill online';$('#connection-pill').innerHTML='<i></i>Online'}
+    try{const [cat,stored,health,demo]=await Promise.all([api('/api/catalog'),api('/api/settings'),api('/healthz'),api('/api/demo')]);catalog=cat;settings=stored;photoAvailable=Boolean(health.photo_available);baseline=snapshot();renderAll();applyDemoState(demo);loadBirdSummary();$('#connection-pill').className='pill online';$('#connection-pill').innerHTML='<i></i>Online'}
     catch(error){$('#connection-pill').className='pill offline';$('#connection-pill').innerHTML='<i></i>Offline';$('#fatal').textContent=error.message;$('#fatal').classList.remove('hidden')}
     finally{$('#loading').classList.add('hidden')}
   }
   acquireToken();$$('.tab').forEach(button=>button.onclick=()=>switchTab(button.dataset.tab));$('#activity-search').oninput=renderActivities;
   $('#enable-all').onclick=()=>{settings.enabled_activities=catalog.activities.map(a=>a.id);renderActivities();setDirty()};$('#disable-all').onclick=()=>{settings.enabled_activities=[];renderActivities();setDirty()};
+  $$('[data-demo-mode]').forEach(button=>button.onclick=()=>startDemo(button.dataset.demoMode));$('#demo-cancel').onclick=cancelDemo;
   $('#save').onclick=()=>save();$('#discard').onclick=()=>{settings=JSON.parse(baseline);renderAll()};$('#reset').onclick=resetAll;$('#refresh').onclick=load;$('#photo-file').onchange=e=>uploadPhoto(e.target.files[0]);$('#render-selected').onclick=renderSelected;
   addEventListener('beforeunload',event=>{if(settings&&snapshot()!==baseline){event.preventDefault();event.returnValue=''}});load();
 })();
@@ -659,6 +713,7 @@ class _ControlHTTPServer(ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         store: SettingsStore,
+        demo_store: DemoOverrideStore,
         catalog: Catalog,
         photo_path: Path,
         output_directory: Path | None,
@@ -673,6 +728,7 @@ class _ControlHTTPServer(ThreadingHTTPServer):
     ):
         super().__init__(address, ControlHandler)
         self.store = store
+        self.demo_store = demo_store
         self.catalog = catalog
         self.photo_path = photo_path
         self.output_directory = output_directory
@@ -811,6 +867,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         elif path == "/birds.js":
             self._reply(200, BIRDS_JS.encode("utf-8"), "text/javascript; charset=utf-8")
         elif path == "/healthz":
+            demo = self.server.demo_store.status()
             self._reply(
                 200,
                 _json_bytes(
@@ -819,6 +876,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                         "schema_version": SCHEMA_VERSION,
                         "photo_available": self.server.photo_path.is_file(),
                         "bird_preview_available": self._bird_preview_available(),
+                        "demo_active": demo["active"],
                     }
                 ),
             )
@@ -826,6 +884,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._reply(200, _json_bytes(self.server.catalog.as_dict()))
         elif path == "/api/settings":
             self._reply(200, _json_bytes(self.server.store.load()))
+        elif path == "/api/demo":
+            self._reply(200, _json_bytes(self.server.demo_store.status()))
         elif path == "/api/birds/summary":
             try:
                 summary = self.server.bird_cache.get(self.server.store.load())
@@ -946,7 +1006,7 @@ class ControlHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self.close_connection = True
         path = urlsplit(self.path).path
-        if path not in ("/api/photo", "/api/settings/reset", "/api/render"):
+        if path not in ("/api/photo", "/api/settings/reset", "/api/render", "/api/demo"):
             self._error(404, "Not found")
             return
         if not self._require_mutation_auth():
@@ -957,6 +1017,39 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self._error(400, "Reset does not accept a request body")
                 return
             self._reply(200, _json_bytes(self.server.store.reset()))
+            return
+        if path == "/api/demo":
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                self._error(415, "Expected application/json")
+                return
+            length = self._content_length(4096)
+            if length is None:
+                return
+            try:
+                value = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeError):
+                self._error(400, "Request body is not valid JSON")
+                return
+            if not isinstance(value, dict) or set(value) != {"mode"}:
+                self._error(422, "Request body must contain only mode")
+                return
+            mode = value.get("mode")
+            if mode not in DEMO_MODES:
+                self._error(
+                    422,
+                    "mode must be weather, birds, star-map, or uploaded-photo",
+                )
+                return
+            if mode == "uploaded-photo" and not self.server.photo_path.is_file():
+                self._error(409, "Upload an image before starting an Image demo")
+                return
+            try:
+                status = self.server.demo_store.activate(mode)
+            except (DemoOverrideError, OSError, RuntimeError, TypeError, ValueError):
+                self._error(503, "The demo override could not be saved")
+                return
+            self._reply(200, _json_bytes(status))
             return
         if path == "/api/render":
             if self.server.render_callback is None:
@@ -1051,6 +1144,24 @@ class ControlHandler(BaseHTTPRequestHandler):
             ),
         )
 
+    def do_DELETE(self) -> None:
+        self.close_connection = True
+        if urlsplit(self.path).path != "/api/demo":
+            self._error(404, "Not found")
+            return
+        if not self._require_mutation_auth():
+            return
+        length_header = self.headers.get("Content-Length")
+        if length_header not in (None, "0"):
+            self._error(400, "Demo cancellation does not accept a request body")
+            return
+        try:
+            status = self.server.demo_store.cancel()
+        except OSError:
+            self._error(503, "The demo override could not be cancelled")
+            return
+        self._reply(200, _json_bytes(status))
+
 
 class ControlServer:
     """Start/stop facade suitable for the simulator, Pi service, and tests."""
@@ -1068,6 +1179,7 @@ class ControlServer:
         render_callback: Callable[[str], bool] | None = None,
         render_status: Callable[[], dict[str, Any]] | None = None,
         bird_cache: BirdWeatherCache | None = None,
+        demo_store: DemoOverrideStore | None = None,
         access_token: str | None = None,
         max_connections: int = 8,
         request_timeout: float = 15.0,
@@ -1094,14 +1206,17 @@ class ControlServer:
             catalog.weather_repo,
             resolved_settings.parent / "birdweather-cache.json",
         )
+        resolved_demo_store = demo_store or DemoOverrideStore(resolved_settings)
         self.host = host
         self.settings_path = resolved_settings
+        self.demo_path = resolved_demo_store.path
         self.photo_path = resolved_photo
         self.output_directory = resolved_output
         self.catalog = catalog
         self.httpd = _ControlHTTPServer(
             (host, port),
             SettingsStore(resolved_settings, catalog),
+            resolved_demo_store,
             catalog,
             resolved_photo,
             resolved_output,

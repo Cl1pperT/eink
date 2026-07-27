@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import http.client
 import io
 import json
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from display_control.demo import DemoOverrideStore
 from display_control.server import AsyncRuntimeRenderer, ControlServer, _runtime_config_values
 from display_control.settings import default_settings
 from tests.test_control_settings import sample_catalog
@@ -22,6 +24,11 @@ class ControlServerTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.catalog = sample_catalog(self.root)
         self.render_requests = []
+        self.demo_now = datetime(2026, 7, 27, 20, 0, tzinfo=timezone.utc)
+        self.demo_store = DemoOverrideStore(
+            self.root / "settings.json",
+            clock=lambda: self.demo_now,
+        )
         self.bird_summary = {
             "provider": "birdweather",
             "source_label": "Nearby BirdWeather reports",
@@ -59,6 +66,7 @@ class ControlServerTests(unittest.TestCase):
                     photo_path=self.root / "latest.png",
                     output_directory=self.root / "frames",
                     bird_cache=bird_cache,
+                    demo_store=self.demo_store,
                     render_callback=lambda mode: self.render_requests.append(mode) or True,
                     access_token="phone-code",
                 )
@@ -89,6 +97,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(b"Activities", body)
         self.assertIn(b"Nearby birds", body)
         self.assertIn(b'id="display-mode"', body)
+        self.assertIn(b"Five-minute demo", body)
+        self.assertEqual(body.count(b"data-demo-mode="), 4)
+        self.assertIn(b"Press the physical button", body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, _headers, body = self.request("GET", "/api/catalog")
         self.assertEqual(status, 200)
@@ -188,6 +199,95 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 422)
         self.assertIn("at least one", json.loads(body)["error"])
         self.assertEqual(self.server.settings_path.read_bytes(), before)
+
+    def test_five_minute_demo_is_authenticated_isolated_and_expires(self):
+        initial_status, _headers, initial_body = self.request("GET", "/api/demo")
+        self.assertEqual(initial_status, 200)
+        self.assertFalse(json.loads(initial_body)["active"])
+
+        settings = self.server.httpd.store.save(default_settings(self.catalog))
+        settings_before = self.server.settings_path.read_bytes()
+        body = json.dumps({"mode": "birds"}).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        }
+        self.assertEqual(self.request("POST", "/api/demo", body, headers)[0], 401)
+        self.assertFalse(self.demo_store.path.exists())
+
+        headers["X-EInk-Control-Token"] = "phone-code"
+        for invalid in (
+            {"mode": "automatic"},
+            {"mode": "test-pattern"},
+            {"mode": "birds", "duration_seconds": 3600},
+        ):
+            encoded = json.dumps(invalid).encode()
+            invalid_headers = dict(headers, **{"Content-Length": str(len(encoded))})
+            self.assertEqual(
+                self.request("POST", "/api/demo", encoded, invalid_headers)[0],
+                422,
+            )
+            self.assertFalse(self.demo_store.path.exists())
+
+        status, _response_headers, payload = self.request(
+            "POST", "/api/demo", body, headers
+        )
+        self.assertEqual(status, 200)
+        active = json.loads(payload)
+        self.assertTrue(active["active"])
+        self.assertEqual(active["mode"], "birds")
+        self.assertEqual(active["duration_seconds"], 300)
+        self.assertEqual(active["remaining_seconds"], 300)
+        self.assertEqual(self.server.settings_path.read_bytes(), settings_before)
+        self.assertEqual(self.render_requests, [])
+
+        demo_before = self.demo_store.path.read_bytes()
+        encoded_settings = json.dumps(settings).encode()
+        settings_headers = dict(
+            headers,
+            **{"Content-Length": str(len(encoded_settings))},
+        )
+        self.assertEqual(
+            self.request(
+                "PUT",
+                "/api/settings",
+                encoded_settings,
+                settings_headers,
+            )[0],
+            200,
+        )
+        self.assertEqual(self.demo_store.path.read_bytes(), demo_before)
+
+        self.demo_now += timedelta(seconds=299)
+        active = json.loads(self.request("GET", "/api/demo")[2])
+        self.assertTrue(active["active"])
+        self.assertEqual(active["remaining_seconds"], 1)
+        self.demo_now += timedelta(seconds=1)
+        self.assertFalse(json.loads(self.request("GET", "/api/demo")[2])["active"])
+
+        weather = json.dumps({"mode": "weather"}).encode()
+        weather_headers = dict(headers, **{"Content-Length": str(len(weather))})
+        self.assertEqual(
+            self.request("POST", "/api/demo", weather, weather_headers)[0],
+            200,
+        )
+        self.assertEqual(self.request("DELETE", "/api/demo")[0], 401)
+        self.assertTrue(self.demo_store.path.exists())
+        status, _response_headers, payload = self.request(
+            "DELETE",
+            "/api/demo",
+            headers={"X-EInk-Control-Token": "phone-code"},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(payload)["active"])
+        self.assertFalse(self.demo_store.path.exists())
+
+        image = json.dumps({"mode": "uploaded-photo"}).encode()
+        image_headers = dict(headers, **{"Content-Length": str(len(image))})
+        self.assertEqual(
+            self.request("POST", "/api/demo", image, image_headers)[0],
+            409,
+        )
 
     def test_authenticated_photo_upload_is_normalized_and_visible(self):
         source = io.BytesIO()

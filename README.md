@@ -91,6 +91,14 @@ the Pi they persist in `/var/lib/eink-display/control/settings.json`, separate
 from the root-owned runtime configuration. Do not forward port 8765 from your
 router; it is intended for a trusted home LAN.
 
+The Overview page also has a diagnostic **Five-minute demo** for Weather,
+Birds, Stars, or the uploaded Image. It temporarily points the virtual
+`active` channel at the latest committed artwork without changing the saved
+display mode. Press the frame's physical button to fetch it immediately. At
+expiry, the next button press or automatic ESP check resumes the saved manual
+mode or automatic schedule. This override never enables fixture/demo artwork;
+it only selects an already committed production frame.
+
 BirdWeather is a regional view of reports from nearby stations. Without a
 microphone attached to this frame it intentionally does not describe those
 reports as visitors to the property or claim to provide local recordings.

@@ -161,6 +161,31 @@ def _load_control_overlay(
     return dict(nested) if isinstance(nested, Mapping) else dict(loaded)
 
 
+def _active_demo_mode(path: Path | None, when: datetime) -> str | None:
+    """Read an optional short-lived control override without making it required."""
+    if path is None:
+        return None
+    try:
+        demo_module = importlib.import_module("display_control.demo")
+        read_demo_override = demo_module.read_demo_override
+        value = read_demo_override(path, now=when)
+    except (
+        ImportError,
+        AttributeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        return None
+    if not isinstance(value, Mapping):
+        return None
+    mode = value.get("mode")
+    allowed = (*SCHEDULED_MODES, "uploaded-photo")
+    return mode if isinstance(mode, str) and mode in allowed else None
+
+
 def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize supported settings-schema spellings into render options."""
 
@@ -517,9 +542,11 @@ class FrameRuntime:
 
         A missing settings file means the safe default, ``automatic``. When a
         settings file exists it must pass the control package's validation, and
-        its selected mode must be canonical. Invalid mutable state fails closed
-        so the frame server returns an availability error and the ESP retains
-        its current physical image.
+        its selected mode must be canonical. A validated, unexpired five-minute
+        demo sidecar temporarily wins without changing that saved preference.
+        Invalid persistent state fails closed so the frame server returns an
+        availability error and the ESP retains its current physical image;
+        invalid transient demo state is simply ignored.
         """
 
         zone = ZoneInfo(self.config.timezone)
@@ -530,7 +557,9 @@ class FrameRuntime:
             else when.astimezone(zone)
         )
         control = self._control_settings(fail_closed=True)
-        selected = control.get("display_mode")
+        selected = _active_demo_mode(self.config.control_settings_path, when)
+        if selected is None:
+            selected = control.get("display_mode")
         if selected is None:
             selected = "automatic"
         if not isinstance(selected, str) or selected not in CANONICAL_MODES:

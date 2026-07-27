@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import sys
@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from display_control.demo import DemoOverrideStore
 from display_runtime.config import ConfigError, load_runtime_config
 from display_runtime.ee02 import EE02_PAYLOAD_BYTES, LandscapeRotation
 from display_runtime.runtime import FrameRuntime, SourcePolicyError, parse_render_time
@@ -406,6 +407,52 @@ class FrameRuntimeTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(SourcePolicyError, "display.mode"):
                     runtime.resolve_active_mode(noon_utc)
+
+    def test_active_demo_override_expires_back_to_saved_mode_or_schedule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings_path = root / "control.json"
+            config = config_for(root, control_settings_path=settings_path)
+            runtime = FrameRuntime(config)
+            morning = datetime.fromisoformat("2026-07-11T15:00:00+00:00")
+            store = DemoOverrideStore(settings_path, clock=lambda: morning)
+            store.activate("birds")
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"display_mode": "automatic"},
+            ):
+                self.assertEqual(runtime.resolve_active_mode(morning), "birds")
+                self.assertEqual(
+                    runtime.resolve_active_mode(morning + timedelta(minutes=4, seconds=59)),
+                    "birds",
+                )
+                self.assertEqual(
+                    runtime.resolve_active_mode(morning + timedelta(minutes=5)),
+                    "weather",
+                )
+
+            night = datetime.fromisoformat("2026-07-12T03:00:00+00:00")
+            store.activate("star-map", now=night)
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"display_mode": "uploaded-photo"},
+            ):
+                self.assertEqual(runtime.resolve_active_mode(night), "star-map")
+                self.assertEqual(
+                    runtime.resolve_active_mode(night + timedelta(minutes=5)),
+                    "uploaded-photo",
+                )
+
+            store.path.write_text("{not-json", encoding="utf-8")
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"display_mode": "automatic"},
+            ):
+                self.assertEqual(runtime.resolve_active_mode(morning), "weather")
 
 
 if __name__ == "__main__":
