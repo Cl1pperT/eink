@@ -68,6 +68,9 @@ class RaspberryPiInstallerTests(unittest.TestCase):
         self.assertIn("backup_units_and_systemd_state", source)
         self.assertIn("rollback_post_swap", source)
         self.assertIn("trap finish_install EXIT", source)
+        self.assertIn('systemctl reset-failed "${ENABLED_UNITS[@]}"', source)
+        self.assertIn("eink-display-package.XXXXXX", source)
+        self.assertIn('"$SOURCE_DIR/display_control"', source)
 
         with (REPOSITORY / "pyproject.toml").open("rb") as stream:
             package = tomllib.load(stream)
@@ -113,6 +116,7 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.assertTrue((app / "INSTALLATION").is_file())
             self.assertFalse((app / ".venv").exists())
             self.assertTrue((state / "cache/matplotlib").is_dir())
+            self.assertTrue((state / "cache/starplot").is_dir())
             self.assertTrue((state / "frames").is_dir())
             self.assertTrue((state / "uploads").is_dir())
             self.assertTrue((state / "control").is_dir())
@@ -163,6 +167,10 @@ class RaspberryPiInstallerTests(unittest.TestCase):
                 combined_units,
             )
             self.assertIn("ReadWritePaths=/srv/eink-state", combined_units)
+            self.assertIn(
+                "STARPLOT_DATA_PATH=/srv/eink-state/cache/starplot",
+                combined_units,
+            )
             self.assertIn("ReadOnlyPaths=/srv/eink-state", combined_units)
             self.assertIn("Restart=on-failure", units["eink-display-render@.service"])
             self.assertIn("RestartSec=15min", units["eink-display-render@.service"])
@@ -197,6 +205,15 @@ class RaspberryPiInstallerTests(unittest.TestCase):
                     stage = root / name
                     self.run_installer(stage, *extra, "--no-enable", "--no-start")
                     self.assertTrue((stage / "opt/eink-display/INSTALLATION").is_file())
+                    if name == "full":
+                        for catalog in (
+                            "constellations.0.3.3.parquet",
+                            "de421.bsp",
+                            "stars.bigksy.0.1.3.mag11.parquet",
+                        ):
+                            self.assertTrue(
+                                (stage / "var/lib/eink-display/cache/starplot" / catalog).is_file()
+                            )
                     self.assertTrue(
                         (stage / "etc/systemd/system/eink-display-server.service").is_file()
                     )

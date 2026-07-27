@@ -25,7 +25,8 @@ avian_weather = ""
 inkystarmap = ""
 
 [sources]
-bird = "http://birdnet.local"
+# Blank uses the BirdWeather settings saved by the phone control panel.
+bird = ""
 starmap = ""
 
 [coordinates]

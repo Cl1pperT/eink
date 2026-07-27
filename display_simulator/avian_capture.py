@@ -1,4 +1,4 @@
-"""Subprocess helper for an offline collage rendered by AvianVisitors itself."""
+"""Subprocess helper for demo or regional BirdWeather AvianVisitors collages."""
 from __future__ import annotations
 
 import argparse
@@ -30,20 +30,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--count-exp", type=float, default=1.0)
     parser.add_argument("--cluster-pad", type=int, default=1)
     parser.add_argument("--packing-budget", type=float)
-    parser.add_argument("--window-hours", type=int, default=168)
+    parser.add_argument("--window-hours", type=int)
+    parser.add_argument("--postal-code")
+    parser.add_argument("--country", default="us")
+    parser.add_argument("--lookback-days", type=int, default=7)
+    parser.add_argument("--title", default="Avian Visitors")
+    parser.add_argument("--subtitle", default="Nearby This Week")
     args = parser.parse_args(argv)
     frame = args.repo.resolve() / "frame"
     if not (frame / "shoot.py").is_file():
         print(f"AvianVisitors frame/shoot.py not found under {args.repo}", file=sys.stderr)
         return 2
+    if args.lookback_days < 1 or args.lookback_days > 30:
+        print("--lookback-days must be from 1 to 30", file=sys.stderr)
+        return 2
     sys.path.insert(0, str(frame))
     try:
         from shoot import shoot_birdweather
+        species = list(DEMO_SPECIES)
+        if args.postal_code:
+            from birdweather import species_for_zip
+
+            species = species_for_zip(
+                args.postal_code,
+                country=args.country,
+                target=24,
+                days=args.lookback_days,
+                timeout=4,
+            )
+            if not species:
+                raise RuntimeError(
+                    f"BirdWeather returned no illustrated nearby species for {args.postal_code}"
+                )
         shoot_birdweather(
             args.out,
-            list(DEMO_SPECIES),
-            title="Avian Visitors",
-            subtitle="Heard This Week",
+            species,
+            title=args.title,
+            subtitle=args.subtitle,
             vw=args.width,
             vh=args.height,
             dsf=2,
@@ -54,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             count_exp=args.count_exp,
             cluster_pad=args.cluster_pad,
             packing_budget=args.packing_budget,
-            window_hours=args.window_hours,
+            window_hours=args.window_hours or args.lookback_days * 24,
             timeout_ms=30_000,
         )
     except Exception as exc:

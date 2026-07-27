@@ -130,6 +130,49 @@ class SourceTests(unittest.TestCase):
         context = RenderContext(Orientation.PORTRAIT)
         self.assertEqual(BirdsSource._layout_arguments(context), [])
 
+    def test_birdweather_provider_uses_regional_settings_without_birdnet_url(self):
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            output = Path(command[command.index("--out") + 1])
+            width = int(command[command.index("--width") + 1])
+            height = int(command[command.index("--height") + 1])
+            from PIL import Image
+
+            Image.new("RGB", (width * 2, height * 2), "white").save(output)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "frame").mkdir()
+            (repo / "frame" / "birdweather.py").write_text("# marker\n")
+            context = RenderContext(
+                Orientation.LANDSCAPE,
+                options={
+                    "avian_repo": str(repo),
+                    "bird_provider": "birdweather",
+                    "bird_postal_code": "84601",
+                    "bird_country": "us",
+                    "bird_lookback_days": 14,
+                    "bird_title": "Avian Visitors",
+                    "bird_subtitle": "Nearby Fortnight",
+                    "bird_source": "",
+                },
+            )
+            with patch("display_simulator.sources.birds.subprocess.run", side_effect=fake_run):
+                source = BirdsSource()
+                image = source.render(context)
+
+        self.assertEqual(image.size, (1600, 1200))
+        self.assertEqual(source.name, "Birds · nearby BirdWeather reports")
+        command = commands[0]
+        self.assertEqual(command[command.index("--postal-code") + 1], "84601")
+        self.assertEqual(command[command.index("--country") + 1], "us")
+        self.assertEqual(command[command.index("--lookback-days") + 1], "14")
+        self.assertEqual(command[command.index("--subtitle") + 1], "Nearby Fortnight")
+        self.assertNotIn("birdnet.local", command)
+
     def test_unreachable_birdnet_uses_original_local_viewer_fixture(self):
         calls = []
 

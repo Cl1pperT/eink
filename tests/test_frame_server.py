@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+from typing import Callable
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -78,12 +79,18 @@ def write_committed_frame(
 
 
 @contextmanager
-def running_server(output_directory: Path, *, auth_token: str = TOKEN):
+def running_server(
+    output_directory: Path,
+    *,
+    auth_token: str = TOKEN,
+    active_mode_resolver: Callable[[], str] | None = None,
+):
     try:
         server = FrameServer(
             ("127.0.0.1", 0),
             output_directory=output_directory,
             auth_token=auth_token,
+            active_mode_resolver=active_mode_resolver,
             chunk_size=4096,
             log_requests=False,
         )
@@ -125,6 +132,85 @@ def request(
 
 
 class FrameServerTests(unittest.TestCase):
+    def test_active_channel_resolves_each_request_and_reports_concrete_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            weather, weather_sha, _ = write_committed_frame(
+                output, mode="weather", byte=0x6F
+            )
+            birds, birds_sha, _ = write_committed_frame(
+                output, mode="birds", byte=0xD2
+            )
+            selection = {"mode": "weather"}
+            calls: list[str] = []
+
+            def resolve() -> str:
+                calls.append(selection["mode"])
+                return selection["mode"]
+
+            with running_server(output, active_mode_resolver=resolve) as server:
+                with request(server, "/v1/frame/active") as response:
+                    self.assertEqual(response.read(), weather)
+                    self.assertEqual(response.headers["X-Frame-SHA256"], weather_sha)
+                    self.assertEqual(response.headers["X-Resolved-Mode"], "weather")
+
+                selection["mode"] = "birds"
+                with request(server, "/v1/frame/active") as response:
+                    self.assertEqual(response.read(), birds)
+                    self.assertEqual(response.headers["X-Frame-SHA256"], birds_sha)
+                    self.assertEqual(response.headers["X-Resolved-Mode"], "birds")
+
+                with request(server, "/v1/manifest/active") as response:
+                    manifest = json.loads(response.read())
+                    self.assertEqual(manifest["mode"], "birds")
+                    self.assertEqual(response.headers["X-Resolved-Mode"], "birds")
+
+            self.assertEqual(calls, ["weather", "birds", "birds"])
+
+    def test_active_channel_selection_and_artifact_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+
+            def broken_resolver() -> str:
+                raise RuntimeError("bad control state")
+
+            resolvers = (
+                None,
+                lambda: "automatic",
+                lambda: "unknown",
+                broken_resolver,
+            )
+            for resolver in resolvers:
+                with self.subTest(resolver=resolver):
+                    with running_server(
+                        output, active_mode_resolver=resolver
+                    ) as server:
+                        with self.assertRaises(HTTPError) as caught:
+                            request(server, "/v1/frame/active")
+                        self.assertEqual(caught.exception.code, 503)
+                        self.assertEqual(
+                            json.loads(caught.exception.read()),
+                            {"error": "artifact_unavailable"},
+                        )
+
+            with running_server(
+                output, active_mode_resolver=lambda: "weather"
+            ) as server:
+                with self.assertRaises(HTTPError) as caught:
+                    request(server, "/v1/frame/active")
+                self.assertEqual(caught.exception.code, 404)
+
+            write_committed_frame(output, mode="weather", byte=0x6F)
+            (output / "weather" / "current.json").write_text(
+                "not json", encoding="utf-8"
+            )
+            with running_server(
+                output, active_mode_resolver=lambda: "weather"
+            ) as server:
+                with self.assertRaises(HTTPError) as caught:
+                    request(server, "/v1/frame/active")
+                self.assertEqual(caught.exception.code, 503)
+
     def test_empty_token_allows_read_only_lan_access(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

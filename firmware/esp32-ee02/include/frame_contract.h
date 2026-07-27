@@ -12,9 +12,10 @@ constexpr size_t kFrameBytes = kBackingWidth * kBackingHeight / 2;
 constexpr char kWireFormat[] = "seeed-ee02-t133a01-4bpp-v1";
 constexpr char kContentType[] = "application/vnd.seeed.ee02-4bpp";
 
-inline bool isConcreteMode(const String &mode) {
-  return mode == "weather" || mode == "birds" || mode == "star-map" ||
-         mode == "uploaded-photo" || mode == "test-pattern";
+inline bool isFrameChannel(const String &mode) {
+  return mode == "active" || mode == "weather" || mode == "birds" ||
+         mode == "star-map" || mode == "uploaded-photo" ||
+         mode == "test-pattern";
 }
 
 inline bool isAllowedColorCode(uint8_t value) {
@@ -36,4 +37,3 @@ inline bool hasOnlySupportedColors(const uint8_t *frame, size_t length) {
 static_assert(kFrameBytes == 960000, "EE02 payload size changed unexpectedly");
 
 }  // namespace eink
-

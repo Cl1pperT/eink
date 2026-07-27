@@ -15,6 +15,7 @@ from display_runtime.ee02 import (
 from display_runtime.frame_server import (
     CONCRETE_MODES,
     FRAME_CONTENT_TYPE,
+    PULL_MODES,
     frame_etag,
 )
 
@@ -56,15 +57,16 @@ class ESP32ContractParityTests(unittest.TestCase):
     def test_modes_and_palette_match_server_and_encoder(self):
         modes = set(re.findall(r'mode\s*==\s*"([^"]+)"', self.contract))
         codes = {int(value, 16) for value in re.findall(r'value\s*==\s*0x([0-9A-Fa-f]+)', self.contract)}
-        self.assertEqual(modes, set(CONCRETE_MODES))
+        self.assertEqual(modes, set(PULL_MODES))
         self.assertEqual(codes, set(EE02_NAMED_COLOR_CODES.values()))
 
-    def test_button_updater_uses_a_concrete_server_mode(self):
+    def test_button_updater_uses_a_supported_server_channel(self):
         mode = re.search(
             r'#define\s+EINK_FRAME_MODE\s+"([^"]+)"', self.device_config
         )
         self.assertIsNotNone(mode)
-        self.assertIn(mode.group(1), CONCRETE_MODES)
+        self.assertIn(mode.group(1), PULL_MODES)
+        self.assertNotIn("active", CONCRETE_MODES)
 
     def test_etag_shape_matches_server(self):
         digest = "a" * 64

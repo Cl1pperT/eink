@@ -32,8 +32,9 @@ PlatformIO/Arduino client for the Seeed XIAO ESP32S3, EE02 driver board, and
 ETags, downloads into PSRAM, verifies the exact 960,000-byte payload and
 SHA-256, and refreshes through pinned Seeed_GFX Setup510 only after validation.
 The Pi performs landscape rotation; the ESP32 copies native backing bytes
-without another transform. NTP-backed automatic mode switches between the
-morning weather, daytime birds, and nighttime star map schedules.
+without another transform. Every five minutes the ESP32 polls the Pi's virtual
+`active` channel, which resolves either the phone-selected mode or the
+configured morning-weather, daytime-birds, and nighttime-star schedule.
 
 ```bash
 cd firmware/esp32-ee02
@@ -67,10 +68,13 @@ python3 -m display_simulator
 
 ## Phone control panel
 
-The same responsive control panel runs on macOS and Raspberry Pi. It manages
-which Utah locations and activities can appear, edits the weather ranges and
-estimated great days per year used by activity ranking, and accepts manual
-photo uploads. From the development checkout, start it with:
+The same responsive control panel runs on macOS and Raspberry Pi. It selects
+automatic/weather/birds/star-map/photo display modes, queues explicit renders,
+manages locations and activity recommendations, and turns phone photo uploads
+into committed frames. Its Birds tab includes a compact current-frame preview
+and a full responsive `/birds` gallery backed by cached, regional BirdWeather
+reports and the local AvianVisitors illustrations. From the development
+checkout, start it with:
 
 ```bash
 python3 -m display_control
@@ -87,9 +91,15 @@ the Pi they persist in `/var/lib/eink-display/control/settings.json`, separate
 from the root-owned runtime configuration. Do not forward port 8765 from your
 router; it is intended for a trusted home LAN.
 
-It generates 1600×1200 landscape or 1200×1600 portrait frames and never updates
-physical hardware. See [display_simulator/README.md](display_simulator/README.md)
-for setup, controls, offline mode, integrations, and limitations.
+BirdWeather is a regional view of reports from nearby stations. Without a
+microphone attached to this frame it intentionally does not describe those
+reports as visitors to the property or claim to provide local recordings.
+
+The desktop simulator generates 1600×1200 landscape or 1200×1600 portrait
+previews. On the Pi, authenticated control actions commit hardware-ready frames
+that the ESP32 picks up on its next poll. See
+[display_simulator/README.md](display_simulator/README.md) for desktop setup,
+controls, offline mode, integrations, and limitations.
 
 This source-tree discovery is a development convenience. The Raspberry Pi
 installer does not copy these locally ignored checkouts; an installed service

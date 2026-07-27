@@ -40,6 +40,14 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
                 "units": "metric",
                 "caption": True,
             }
+            value["birds"] = {
+                "provider": "birdweather",
+                "postal_code": "84601",
+                "country": "us",
+                "lookback_days": 14,
+                "title": "Avian Visitors",
+                "subtitle": "Nearby Fortnight",
+            }
             value["activity_overrides"] = {
                 "hammocking": {"estimated_great_days": 25}
             }
@@ -56,6 +64,12 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(context.options["minimum_suitability"], 0.7)
             self.assertEqual(context.options["weather_units"], "metric")
             self.assertTrue(context.options["weather_caption"])
+            self.assertEqual(context.options["bird_provider"], "birdweather")
+            self.assertEqual(context.options["bird_postal_code"], "84601")
+            self.assertEqual(context.options["bird_country"], "us")
+            self.assertEqual(context.options["bird_lookback_days"], 14)
+            self.assertEqual(context.options["bird_title"], "Avian Visitors")
+            self.assertEqual(context.options["bird_subtitle"], "Nearby Fortnight")
             self.assertEqual(
                 context.options["activity_overrides"]["hammocking"]["estimated_great_days"],
                 25,

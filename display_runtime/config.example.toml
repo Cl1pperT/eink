@@ -41,7 +41,9 @@ avian_weather = "/opt/eink/AvianVisitors"
 inkystarmap = "/opt/eink/inkystarmap"
 
 [sources]
-bird = "http://birdnet.local"
+# The control panel defaults to regional BirdWeather reports (postal code
+# 84601). Leave this blank unless a real BirdNET/Avian microphone site exists.
+bird = ""
 bird_demo = false
 starmap = ""
 photo = "/var/lib/eink-display/uploads/latest.png"

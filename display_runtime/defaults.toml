@@ -36,7 +36,9 @@ avian_weather = ""
 inkystarmap = ""
 
 [sources]
-bird = "http://birdnet.local"
+# Blank selects the BirdWeather provider configured in control/settings.json.
+# Set an explicit URL only for a separately installed live BirdNET/Avian site.
+bird = ""
 bird_demo = false
 starmap = ""
 photo = ""

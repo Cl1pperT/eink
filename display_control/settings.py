@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+DISPLAY_MODES = (
+    "automatic",
+    "weather",
+    "birds",
+    "star-map",
+    "uploaded-photo",
+)
 RANGE_FIELDS = (
     "tolerable_min",
     "ideal_min",
@@ -34,6 +41,11 @@ ARTWORK_ALIASES = {
     "stand_up_paddleboarding": "paddleboarding",
     "hammocking": "hammocking",
     "cross_country_skiing": "skiing",
+}
+# Schema-v1 deployments used a Provo-specific scene ID. The current catalog
+# represents that same local Wasatch setting with its Mount Timpanogos scene.
+LEGACY_LOCATION_IDS = {
+    "provo_utah": "mount_timpanogos",
 }
 
 
@@ -289,6 +301,15 @@ def default_settings(catalog: Catalog) -> dict[str, Any]:
             "location_name": "Provo, Utah",
             "units": "imperial",
             "caption": False,
+            "mode": "automatic",
+        },
+        "birds": {
+            "provider": "birdweather",
+            "postal_code": "84601",
+            "country": "us",
+            "lookback_days": 7,
+            "title": "Avian Visitors",
+            "subtitle": "Nearby This Week",
         },
         "photo": {
             "caption": "",
@@ -422,17 +443,26 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
         "minimum_suitability",
         "activity_overrides",
         "display",
+        "birds",
         "photo",
     }
     _reject_unknown(data, allowed, "settings")
     defaults = default_settings(catalog)
-    version = data.get("schema_version", SCHEMA_VERSION)
-    if version != SCHEMA_VERSION:
+    # Version 1 is migrated in memory by filling the v2 display-mode and
+    # BirdWeather fields from defaults. The next successful save persists v2.
+    version = data.get("schema_version", 1)
+    if isinstance(version, bool) or version not in (1, SCHEMA_VERSION):
         raise SettingsValidationError(
-            f"Unsupported schema_version {version!r}; expected {SCHEMA_VERSION}"
+            f"Unsupported schema_version {version!r}; expected 1 or {SCHEMA_VERSION}"
         )
+    location_value = data.get("enabled_locations", defaults["enabled_locations"])
+    if version == 1 and isinstance(location_value, list):
+        location_value = [
+            LEGACY_LOCATION_IDS.get(item, item) if isinstance(item, str) else item
+            for item in location_value
+        ]
     locations = _id_list(
-        data.get("enabled_locations", defaults["enabled_locations"]),
+        location_value,
         set(catalog.location_ids),
         "enabled_locations",
         nonempty=True,
@@ -458,7 +488,7 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
     overrides = _validated_overrides(data.get("activity_overrides", {}), catalog)
 
     display = _expect_mapping(data.get("display", defaults["display"]), "display")
-    _reject_unknown(display, {"location_name", "units", "caption"}, "display")
+    _reject_unknown(display, {"location_name", "units", "caption", "mode"}, "display")
     location_name = _short_string(
         display.get("location_name", defaults["display"]["location_name"]),
         "display.location_name",
@@ -471,6 +501,55 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
     caption = display.get("caption", defaults["display"]["caption"])
     if not isinstance(caption, bool):
         raise SettingsValidationError("display.caption must be true or false")
+    display_mode = display.get("mode", defaults["display"]["mode"])
+    if display_mode not in DISPLAY_MODES:
+        raise SettingsValidationError(
+            "display.mode must be automatic, weather, birds, star-map, or uploaded-photo"
+        )
+
+    birds = _expect_mapping(data.get("birds", defaults["birds"]), "birds")
+    _reject_unknown(
+        birds,
+        {"provider", "postal_code", "country", "lookback_days", "title", "subtitle"},
+        "birds",
+    )
+    provider = birds.get("provider", defaults["birds"]["provider"])
+    if provider != "birdweather":
+        raise SettingsValidationError("birds.provider must be birdweather")
+    postal_code = _short_string(
+        birds.get("postal_code", defaults["birds"]["postal_code"]),
+        "birds.postal_code",
+        10,
+        allow_empty=False,
+    )
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 -]{1,9}", postal_code) is None:
+        raise SettingsValidationError("birds.postal_code must be a valid postal code")
+    country = _short_string(
+        birds.get("country", defaults["birds"]["country"]),
+        "birds.country",
+        2,
+        allow_empty=False,
+    ).casefold()
+    if re.fullmatch(r"[a-z]{2}", country) is None:
+        raise SettingsValidationError("birds.country must be a two-letter country code")
+    lookback_days = _bounded_integer(
+        birds.get("lookback_days", defaults["birds"]["lookback_days"]),
+        1,
+        30,
+        "birds.lookback_days",
+    )
+    bird_title = _short_string(
+        birds.get("title", defaults["birds"]["title"]),
+        "birds.title",
+        80,
+        allow_empty=False,
+    )
+    bird_subtitle = _short_string(
+        birds.get("subtitle", defaults["birds"]["subtitle"]),
+        "birds.subtitle",
+        120,
+        allow_empty=False,
+    )
 
     photo = _expect_mapping(data.get("photo", defaults["photo"]), "photo")
     _reject_unknown(photo, {"caption", "rotation", "enabled"}, "photo")
@@ -491,7 +570,20 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
         "recommendation_count": count,
         "minimum_suitability": suitability,
         "activity_overrides": overrides,
-        "display": {"location_name": location_name, "units": units, "caption": caption},
+        "display": {
+            "location_name": location_name,
+            "units": units,
+            "caption": caption,
+            "mode": display_mode,
+        },
+        "birds": {
+            "provider": provider,
+            "postal_code": postal_code,
+            "country": country,
+            "lookback_days": lookback_days,
+            "title": bird_title,
+            "subtitle": bird_subtitle,
+        },
         "photo": {
             "caption": photo_caption,
             "rotation": int(rotation),

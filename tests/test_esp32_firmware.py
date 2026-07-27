@@ -101,11 +101,25 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertIn("containsHttpUnsafeCharacters(EINK_FRAME_AUTH_TOKEN)", self.source)
         self.assertIn("authority.indexOf('@')", self.source)
 
-    def test_each_user_button_wakes_one_check_then_deep_sleep(self):
-        self.assertIn('#define EINK_FRAME_MODE "uploaded-photo"', self.device_config)
+    def test_local_server_names_are_resolved_with_mdns(self):
+        self.assertIn("#include <ESPmDNS.h>", self.source)
+        self.assertIn('hostname.endsWith(".local")', self.source)
+        self.assertIn("MDNS.queryHost(mdnsName, 5000)", self.source)
+
+    def test_timer_or_user_button_wakes_one_check_then_deep_sleep(self):
+        self.assertIn('#define EINK_FRAME_MODE "active"', self.device_config)
+        self.assertIn('mode == "active"', self.contract)
+        self.assertIn("isFrameChannel", self.source)
+        self.assertIn(
+            "#define EINK_CHECK_INTERVAL_SECONDS 300ULL", self.device_config
+        )
         for pin in ("GPIO_NUM_2", "GPIO_NUM_3", "GPIO_NUM_5"):
             self.assertIn(pin, self.source)
         self.assertIn("ESP_EXT1_WAKEUP_ANY_LOW", self.source)
+        self.assertIn(
+            "esp_sleep_enable_timer_wakeup(EINK_CHECK_INTERVAL_SECONDS * 1000000ULL)",
+            self.source,
+        )
         self.assertIn("syncFrame(EINK_FRAME_MODE);", self.source)
         self.assertIn("esp_deep_sleep_start();", self.source)
         self.assertNotIn("EINK_POLL_INTERVAL_MS", self.source)

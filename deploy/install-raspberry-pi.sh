@@ -319,18 +319,40 @@ reject_symlink "$CONFIG_FS" "configuration directory"
 reject_symlink "$STATE_FS" "state directory"
 install -d -m 0755 "$INSTALL_FS" "$UNIT_FS"
 install -d -m 0750 "$CONFIG_FS" "$STATE_FS"
-for managed_state_path in cache cache/matplotlib frames uploads control; do
+for managed_state_path in cache cache/matplotlib cache/starplot \
+    cache/starplot/duckdb-extensions frames uploads control; do
     reject_symlink "$STATE_FS/$managed_state_path" \
         "managed state path $managed_state_path"
 done
 install -d -m 0750 "$STATE_FS/cache" "$STATE_FS/cache/matplotlib" \
+    "$STATE_FS/cache/starplot" "$STATE_FS/cache/starplot/duckdb-extensions" \
     "$STATE_FS/frames" "$STATE_FS/uploads" "$STATE_FS/control"
 if [[ -z "$DESTDIR" ]]; then
     chown root:root "$INSTALL_FS"
     chown root:"$SERVICE_GROUP" "$CONFIG_FS"
     chown "$SERVICE_USER":"$SERVICE_GROUP" "$STATE_FS" "$STATE_FS/cache" \
-        "$STATE_FS/cache/matplotlib" "$STATE_FS/frames" "$STATE_FS/uploads" \
-        "$STATE_FS/control"
+        "$STATE_FS/cache/matplotlib" "$STATE_FS/cache/starplot" \
+        "$STATE_FS/cache/starplot/duckdb-extensions" "$STATE_FS/frames" \
+        "$STATE_FS/uploads" "$STATE_FS/control"
+fi
+
+if [[ "$CORE_ONLY" == false ]]; then
+    # Starplot stores its DuckDB spatial extension beside these catalogs, so
+    # seed all three into the service-owned cache rather than the read-only
+    # application directory.
+    for catalog in constellations.0.3.3.parquet de421.bsp \
+        stars.bigksy.0.1.3.mag11.parquet; do
+        [[ -f "$SOURCE_DIR/$catalog" ]] \
+            || die "Starplot catalog is missing: $SOURCE_DIR/$catalog"
+        reject_symlink "$STATE_FS/cache/starplot/$catalog" \
+            "Starplot catalog $catalog"
+        install -m 0644 "$SOURCE_DIR/$catalog" \
+            "$STATE_FS/cache/starplot/$catalog"
+        if [[ -z "$DESTDIR" ]]; then
+            chown "$SERVICE_USER":"$SERVICE_GROUP" \
+                "$STATE_FS/cache/starplot/$catalog"
+        fi
+    done
 fi
 
 install_configuration() {
@@ -462,6 +484,7 @@ render_units() {
 }
 
 NEW_VENV=""
+PACKAGE_SOURCE=""
 ACTIVE_VENV="$INSTALL_FS/.venv"
 OLD_VENV="$INSTALL_FS/.venv.rollback"
 UNIT_BACKUP_DIR="$INSTALL_FS/.units.rollback"
@@ -471,6 +494,9 @@ UNIT_WAS_ACTIVE=()
 cleanup_new_venv() {
     if [[ -n "$NEW_VENV" && -d "$NEW_VENV" ]]; then
         rm -rf -- "$NEW_VENV"
+    fi
+    if [[ -n "$PACKAGE_SOURCE" && -d "$PACKAGE_SOURCE" ]]; then
+        rm -rf -- "$PACKAGE_SOURCE"
     fi
 }
 
@@ -581,14 +607,23 @@ trap finish_install EXIT
 if [[ -z "$DESTDIR" ]]; then
     NEW_VENV="$INSTALL_FS/.venv.new"
     rm -rf -- "$NEW_VENV" "$OLD_VENV"
+    # Build from a clean, private snapshot. Setuptools otherwise reuses a
+    # checkout's ignored build/ directory when its timestamps are newer than
+    # source files, which can silently put stale Python modules in the wheel.
+    PACKAGE_SOURCE="$(mktemp -d /tmp/eink-display-package.XXXXXX)"
+    cp -a -- "$SOURCE_DIR/pyproject.toml" "$SOURCE_DIR/README.md" \
+        "$SOURCE_DIR/display_control" "$SOURCE_DIR/display_runtime" \
+        "$SOURCE_DIR/display_simulator" "$PACKAGE_SOURCE/"
     log "building a fresh Python virtual environment"
     python3 -m venv "$NEW_VENV"
     "$NEW_VENV/bin/python" -m pip install --upgrade pip setuptools wheel
     if "$CORE_ONLY"; then
-        "$NEW_VENV/bin/python" -m pip install "$SOURCE_DIR"
+        "$NEW_VENV/bin/python" -m pip install "$PACKAGE_SOURCE"
     else
-        "$NEW_VENV/bin/python" -m pip install "${SOURCE_DIR}[integrations]"
+        "$NEW_VENV/bin/python" -m pip install "${PACKAGE_SOURCE}[integrations]"
     fi
+    rm -rf -- "$PACKAGE_SOURCE"
+    PACKAGE_SOURCE=""
 
     if ! "$SKIP_BROWSER"; then
         if ! "$SKIP_OS_DEPS"; then
@@ -662,6 +697,10 @@ if [[ -z "$DESTDIR" ]]; then
         systemd-analyze verify "${UNIT_PATHS[@]}"
     fi
     systemctl daemon-reload
+    # A repaired service may still be inside systemd's start-limit window from
+    # the prior broken version. Clear that historical failure state before
+    # validating the freshly activated environment.
+    systemctl reset-failed "${ENABLED_UNITS[@]}" >/dev/null 2>&1 || true
     if ! "$NO_ENABLE"; then
         systemctl enable "${ENABLED_UNITS[@]}"
         if ! "$NO_START"; then

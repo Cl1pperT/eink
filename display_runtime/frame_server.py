@@ -4,7 +4,9 @@ The server deliberately does not render frames.  It only exposes a mode's
 atomically committed ``current.json`` and the immutable, content-addressed
 EE02 payloads referenced by those manifests.  This keeps HTTP requests out of
 the comparatively expensive source/render pipeline and gives an ESP client a
-small, deterministic pull protocol.
+small, deterministic pull protocol.  The virtual ``active`` channel resolves a
+validated phone-control or scheduled selection to one concrete committed mode
+at the start of every request.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from pathlib import Path
 import re
 import stat
 from threading import BoundedSemaphore, Thread
-from typing import BinaryIO, Iterator, Mapping
+from typing import BinaryIO, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
 from .ee02 import (
@@ -35,6 +37,8 @@ from .ee02 import (
 CONCRETE_MODES = frozenset(
     ("weather", "birds", "star-map", "uploaded-photo", "test-pattern")
 )
+ACTIVE_MODE = "active"
+PULL_MODES = CONCRETE_MODES | {ACTIVE_MODE}
 MANIFEST_FORMAT = "eink-frame-artifacts-v2"
 MANIFEST_SCHEMA_VERSION = 2
 FRAME_CONTENT_TYPE = "application/vnd.seeed.ee02-4bpp"
@@ -312,6 +316,7 @@ class FrameServer(ThreadingHTTPServer):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        active_mode_resolver: Callable[[], str] | None = None,
         log_requests: bool = True,
     ) -> None:
         token = str(auth_token)
@@ -332,9 +337,37 @@ class FrameServer(ThreadingHTTPServer):
         self.chunk_size = chunk_size
         self.max_connections = max_connections
         self.request_timeout = float(request_timeout)
+        if active_mode_resolver is not None and not callable(active_mode_resolver):
+            raise ValueError("active_mode_resolver must be callable")
+        self.active_mode_resolver = active_mode_resolver
         self._worker_slots = BoundedSemaphore(max_connections)
         self.log_requests = bool(log_requests)
         super().__init__(server_address, FrameRequestHandler)
+
+    def resolve_mode(self, requested_mode: str) -> str:
+        """Resolve a concrete mode for one request.
+
+        ``active`` is intentionally resolved at request time rather than cached,
+        so a schedule boundary or phone-control change is visible to the ESP on
+        its next poll. Resolver failures are availability failures: serving an
+        arbitrary fallback would be less safe than leaving the panel unchanged.
+        """
+
+        if requested_mode in CONCRETE_MODES:
+            return requested_mode
+        if requested_mode != ACTIVE_MODE:
+            raise ArtifactNotFound("unknown display mode")
+        if self.active_mode_resolver is None:
+            raise ArtifactUnavailable("active display mode is not configured")
+        try:
+            selected = self.active_mode_resolver()
+        except Exception as exc:
+            raise ArtifactUnavailable("active display mode could not be resolved") from exc
+        if not isinstance(selected, str) or selected not in CONCRETE_MODES:
+            raise ArtifactUnavailable(
+                "active display mode resolver returned an invalid mode"
+            )
+        return selected
 
     def get_request(self):
         request, client_address = super().get_request()
@@ -452,8 +485,8 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
         return hmac.compare_digest(provided, expected)
 
     def _serve_manifest(self, mode: str, *, send_body: bool) -> None:
-        if mode not in CONCRETE_MODES:
-            raise ArtifactNotFound("unknown display mode")
+        requested_mode = mode
+        mode = self.frame_server.resolve_mode(requested_mode)
         payload, wire_sha, frame_path = _read_manifest(
             self.frame_server.output_directory, mode
         )
@@ -481,6 +514,8 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
             "X-Frame-SHA256": wire_sha,
             "X-Frame-Format": EE02_WIRE_FORMAT,
         }
+        if requested_mode == ACTIVE_MODE:
+            common_headers["X-Resolved-Mode"] = mode
         if etag_matches(self.headers.get("If-None-Match"), etag):
             self._send_not_modified(common_headers)
             return
@@ -495,8 +530,8 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
     def _serve_frame(
         self, mode: str, requested_sha: str | None, *, send_body: bool
     ) -> None:
-        if mode not in CONCRETE_MODES:
-            raise ArtifactNotFound("unknown display mode")
+        requested_mode = mode
+        mode = self.frame_server.resolve_mode(requested_mode)
         manifest_path: Path | None = None
         if requested_sha is None:
             _payload, wire_sha, manifest_path = _read_manifest(
@@ -527,6 +562,8 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
             "X-Frame-SHA256": wire_sha,
             "X-Frame-Format": EE02_WIRE_FORMAT,
         }
+        if requested_mode == ACTIVE_MODE:
+            common_headers["X-Resolved-Mode"] = mode
         if etag_matches(self.headers.get("If-None-Match"), etag):
             handle.close()
             self._send_not_modified(common_headers)
@@ -624,6 +661,7 @@ def running_frame_server(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     max_connections: int = DEFAULT_MAX_CONNECTIONS,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    active_mode_resolver: Callable[[], str] | None = None,
     log_requests: bool = False,
 ) -> Iterator[FrameServer]:
     """Run a frame server in a background thread for a bounded scope."""
@@ -635,6 +673,7 @@ def running_frame_server(
         chunk_size=chunk_size,
         max_connections=max_connections,
         request_timeout=request_timeout,
+        active_mode_resolver=active_mode_resolver,
         log_requests=log_requests,
     )
     thread = server.start_in_thread()
@@ -647,6 +686,7 @@ def running_frame_server(
 
 
 __all__ = [
+    "ACTIVE_MODE",
     "ArtifactNotFound",
     "ArtifactUnavailable",
     "CONCRETE_MODES",
@@ -657,6 +697,7 @@ __all__ = [
     "FrameRequestHandler",
     "FrameServer",
     "FrameServerError",
+    "PULL_MODES",
     "etag_matches",
     "frame_etag",
     "running_frame_server",

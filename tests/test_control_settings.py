@@ -57,8 +57,52 @@ class ControlSettingsTests(unittest.TestCase):
             settings = default_settings(catalog)
             self.assertEqual(settings["enabled_locations"], list(catalog.location_ids))
             self.assertEqual(settings["enabled_activities"], list(catalog.activity_ids))
+            self.assertEqual(settings["schema_version"], 2)
+            self.assertEqual(settings["display"]["mode"], "automatic")
+            self.assertEqual(
+                settings["birds"],
+                {
+                    "provider": "birdweather",
+                    "postal_code": "84601",
+                    "country": "us",
+                    "lookback_days": 7,
+                    "title": "Avian Visitors",
+                    "subtitle": "Nearby This Week",
+                },
+            )
             settings["enabled_activities"] = []
             self.assertEqual(validate_settings(settings, catalog)["enabled_activities"], [])
+
+    def test_v1_settings_migrate_without_losing_existing_choices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = sample_catalog(Path(directory))
+            legacy = default_settings(catalog)
+            legacy["schema_version"] = 1
+            legacy["display"].pop("mode")
+            legacy.pop("birds")
+            legacy["enabled_locations"] = ["provo_utah"]
+            migrated = validate_settings(legacy, catalog)
+            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(migrated["enabled_locations"], ["mount_timpanogos"])
+            self.assertEqual(migrated["display"]["mode"], "automatic")
+            self.assertEqual(migrated["birds"]["postal_code"], "84601")
+
+    def test_invalid_display_mode_and_birdweather_fields_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = sample_catalog(Path(directory))
+            cases = (
+                (("display", "mode"), "live-microphone", "display.mode"),
+                (("birds", "provider"), "birdnet", "birds.provider"),
+                (("birds", "postal_code"), "../etc", "postal_code"),
+                (("birds", "country"), "USA", "country"),
+                (("birds", "lookback_days"), 0, "1 to 30"),
+            )
+            for path, value, message in cases:
+                with self.subTest(path=path):
+                    settings = default_settings(catalog)
+                    settings[path[0]][path[1]] = value
+                    with self.assertRaisesRegex(SettingsValidationError, message):
+                        validate_settings(settings, catalog)
 
     def test_invalid_ids_days_ranges_weights_and_nonfinite_values_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

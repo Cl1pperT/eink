@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <TFT_eSPI.h>
@@ -39,6 +40,8 @@ static_assert(TFT_WHITE == 0x0 && TFT_GREEN == 0x2 && TFT_RED == 0x6 &&
 static_assert(EINK_HTTP_READ_TIMEOUT_MS > 0 &&
                   EINK_HTTP_READ_TIMEOUT_MS <= 65535UL,
               "HTTPClient read timeout must fit its 16-bit millisecond API");
+static_assert(EINK_CHECK_INTERVAL_SECONDS > 0,
+              "EINK_CHECK_INTERVAL_SECONDS must be positive");
 
 namespace {
 
@@ -107,7 +110,7 @@ bool configurationIsUsable() {
     Serial.println("Configuration error: provision the Pi http:// server URL");
     return false;
   }
-  if (!eink::isConcreteMode(EINK_FRAME_MODE)) {
+  if (!eink::isFrameChannel(EINK_FRAME_MODE)) {
     Serial.println("Configuration error: EINK_FRAME_MODE is invalid");
     return false;
   }
@@ -169,7 +172,7 @@ void loadDisplayState() {
   displayedMode = preferences.getString(kPreferenceMode, "");
   displayedSha = preferences.getString(kPreferenceSha, "");
   displayedEtag = preferences.getString(kPreferenceEtag, "");
-  if (!persistedStateIsValid || !eink::isConcreteMode(displayedMode) ||
+  if (!persistedStateIsValid || !eink::isFrameChannel(displayedMode) ||
       !isLowercaseSha256(displayedSha) ||
       displayedEtag != etagForSha(displayedSha)) {
     displayedMode = "";
@@ -269,6 +272,29 @@ String frameUrl(const String &mode) {
   while (base.endsWith("/")) {
     base.remove(base.length() - 1);
   }
+  const String authority = base.substring(7);
+  String hostname = authority;
+  String port;
+  const int colon = authority.lastIndexOf(':');
+  if (colon >= 0) {
+    hostname = authority.substring(0, colon);
+    port = authority.substring(colon);
+  }
+  if (hostname.endsWith(".local")) {
+    const String mdnsName = hostname.substring(0, hostname.length() - 6);
+    if (!MDNS.begin("eink-ee02")) {
+      Serial.println("Could not start mDNS");
+      return String();
+    }
+    const IPAddress address = MDNS.queryHost(mdnsName, 5000);
+    if (address == INADDR_NONE) {
+      Serial.printf("Could not resolve %s with mDNS\n", hostname.c_str());
+      return String();
+    }
+    base = String("http://") + address.toString() + port;
+    Serial.printf("Resolved %s to %s\n", hostname.c_str(),
+                  address.toString().c_str());
+  }
   return base + "/v1/frame/" + mode;
 }
 
@@ -325,7 +351,7 @@ bool refreshPanel(const uint8_t *verifiedFrame) {
 }
 
 SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
-  if (!eink::isConcreteMode(mode)) {
+  if (!eink::isFrameChannel(mode)) {
     Serial.println("Refusing an unsupported frame mode");
     return SyncResult::kFailed;
   }
@@ -348,6 +374,9 @@ SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
                       sizeof(headerNames) / sizeof(headerNames[0]));
 
   const String url = frameUrl(mode);
+  if (url.length() == 0) {
+    return SyncResult::kFailed;
+  }
   if (!http.begin(transport, url)) {
     Serial.println("Could not initialize the HTTP request");
     return SyncResult::kFailed;
@@ -489,6 +518,7 @@ bool anyButtonIsPressed() {
 }
 
 void sleepUntilButton() {
+  MDNS.end();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   if (preferencesReady) {
@@ -503,7 +533,10 @@ void sleepUntilButton() {
   }
 
   esp_sleep_enable_ext1_wakeup(kButtonWakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
-  Serial.println("Sleeping; press any user button to check for a new image");
+  esp_sleep_enable_timer_wakeup(EINK_CHECK_INTERVAL_SECONDS * 1000000ULL);
+  Serial.printf(
+      "Sleeping; checking again in %llu seconds or on any user button\n",
+      EINK_CHECK_INTERVAL_SECONDS);
   Serial.flush();
   delay(20);
   esp_deep_sleep_start();
@@ -520,6 +553,8 @@ void setup() {
   Serial.println("EE02 button image updater starting");
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
     Serial.println("Wake reason: user button");
+  } else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("Wake reason: five-minute timer");
   } else {
     Serial.println("Wake reason: power-on, reset, or upload");
   }

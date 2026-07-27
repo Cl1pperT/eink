@@ -96,6 +96,8 @@ def _first_value(*values: Any, default: Any = None) -> Any:
 def _load_control_overlay(
     path: Path | None,
     weather_repository: Path | None,
+    *,
+    fail_closed: bool = False,
 ) -> dict[str, Any]:
     """Read the mutable control-panel settings without coupling the renderer to it.
 
@@ -147,9 +149,13 @@ def _load_control_overlay(
         TypeError,
         UnicodeError,
         ValueError,
-    ):
+    ) as exc:
+        if fail_closed:
+            raise RuntimeError("control settings could not be validated") from exc
         return {}
     if not isinstance(loaded, Mapping):
+        if fail_closed:
+            raise RuntimeError("validated control settings are not an object")
         return {}
     nested = loaded.get("control_panel")
     return dict(nested) if isinstance(nested, Mapping) else dict(loaded)
@@ -162,6 +168,7 @@ def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
     activities = _mapping(settings.get("activities"))
     weather = _mapping(settings.get("weather"))
     display = _mapping(settings.get("display"))
+    birds = _mapping(settings.get("birds"))
     photo = _mapping(settings.get("photo"))
 
     enabled_environments = _first_value(
@@ -185,6 +192,11 @@ def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
         default={},
     )
     return {
+        "display_mode": _first_value(
+            settings.get("display_mode"),
+            settings.get("mode"),
+            display.get("mode"),
+        ),
         "location": _first_value(
             settings.get("location_name"),
             display.get("location_name"),
@@ -222,6 +234,30 @@ def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
             weather.get("units"),
             display.get("weather_units"),
             display.get("units"),
+        ),
+        "bird_provider": _first_value(
+            settings.get("bird_provider"),
+            birds.get("provider"),
+        ),
+        "bird_postal_code": _first_value(
+            settings.get("bird_postal_code"),
+            birds.get("postal_code"),
+        ),
+        "bird_country": _first_value(
+            settings.get("bird_country"),
+            birds.get("country"),
+        ),
+        "bird_lookback_days": _first_value(
+            settings.get("bird_lookback_days"),
+            birds.get("lookback_days"),
+        ),
+        "bird_title": _first_value(
+            settings.get("bird_title"),
+            birds.get("title"),
+        ),
+        "bird_subtitle": _first_value(
+            settings.get("bird_subtitle"),
+            birds.get("subtitle"),
         ),
         "photo_path": _first_value(settings.get("photo_path"), photo.get("path")),
         "photo_caption": _first_value(settings.get("photo_caption"), photo.get("caption")),
@@ -468,12 +504,38 @@ class FrameRuntime:
             return requested
         return canonical_mode(mode_for_time(when, self.config.schedule))
 
-    def _control_settings(self) -> dict[str, Any]:
+    def _control_settings(self, *, fail_closed: bool = False) -> dict[str, Any]:
         loaded = _load_control_overlay(
             self.config.control_settings_path,
             self.config.avian_weather_repo,
+            fail_closed=fail_closed,
         )
         return _control_values(loaded) if loaded else {}
+
+    def resolve_active_mode(self, when: datetime | None = None) -> str:
+        """Resolve the phone-selected display channel to one concrete mode.
+
+        A missing settings file means the safe default, ``automatic``. When a
+        settings file exists it must pass the control package's validation, and
+        its selected mode must be canonical. Invalid mutable state fails closed
+        so the frame server returns an availability error and the ESP retains
+        its current physical image.
+        """
+
+        zone = ZoneInfo(self.config.timezone)
+        when = when or datetime.now(zone)
+        when = (
+            when.replace(tzinfo=zone)
+            if when.tzinfo is None
+            else when.astimezone(zone)
+        )
+        control = self._control_settings(fail_closed=True)
+        selected = control.get("display_mode")
+        if selected is None:
+            selected = "automatic"
+        if not isinstance(selected, str) or selected not in CANONICAL_MODES:
+            raise SourcePolicyError("control display.mode is not a valid canonical mode")
+        return self.resolve_mode(selected, when)
 
     def _photo_path(self, control: Mapping[str, Any]) -> Path | None:
         overlay = _overlay_path(
@@ -542,18 +604,36 @@ class FrameRuntime:
                 )
             return
         if mode == "birds":
-            if strict and (cfg.bird_demo or not cfg.bird_source):
-                raise SourcePolicyError("production bird rendering requires sources.bird")
+            if strict and cfg.bird_demo:
+                raise SourcePolicyError("fixture bird rendering is disabled in production")
             if cfg.bird_source and not cfg.bird_source.startswith(("http://", "https://")):
                 if not Path(cfg.bird_source).is_file():
                     raise FileNotFoundError(f"bird frame not found: {cfg.bird_source}")
+            elif cfg.bird_source:
+                if strict:
+                    self._repository(
+                        cfg.avian_weather_repo,
+                        "frame/shoot.py",
+                        "AvianVisitors",
+                        "AVIANVISITORS_REPO",
+                    )
             elif strict:
-                self._repository(
+                repository = self._repository(
                     cfg.avian_weather_repo,
                     "frame/shoot.py",
                     "AvianVisitors",
                     "AVIANVISITORS_REPO",
                 )
+                provider = control.get("bird_provider", "birdweather")
+                if provider != "birdweather":
+                    raise SourcePolicyError(
+                        "production birds require the validated BirdWeather provider"
+                    )
+                adapter = repository / "frame" / "birdweather.py"
+                if not adapter.is_file():
+                    raise SourcePolicyError(
+                        f"AvianVisitors repository is invalid; expected {adapter}"
+                    )
             if strict and cfg.avian_python is not None and not cfg.avian_python.is_file():
                 raise SourcePolicyError(f"sources.avian_python does not exist: {cfg.avian_python}")
             return
@@ -628,6 +708,32 @@ class FrameRuntime:
             f"dither={cfg.conversion.dither} · saturation={cfg.conversion.saturation:.2f} · "
             f"blue bias={cfg.conversion.blue_bias:.2f}"
         )
+        # An explicit page/file source remains authoritative. With no explicit
+        # source, the validated control overlay selects the keyless regional
+        # BirdWeather integration and supplies its bounded query settings.
+        bird_provider = ""
+        if not cfg.bird_source:
+            candidate = control.get("bird_provider", "birdweather")
+            bird_provider = candidate if candidate == "birdweather" else ""
+        bird_postal_code = control.get("bird_postal_code", "84601")
+        if not isinstance(bird_postal_code, str) or not bird_postal_code.strip():
+            bird_postal_code = "84601"
+        bird_country = control.get("bird_country", "us")
+        if not isinstance(bird_country, str) or len(bird_country.strip()) != 2:
+            bird_country = "us"
+        bird_lookback_days = control.get("bird_lookback_days", 7)
+        if (
+            isinstance(bird_lookback_days, bool)
+            or not isinstance(bird_lookback_days, int)
+            or not 1 <= bird_lookback_days <= 30
+        ):
+            bird_lookback_days = 7
+        bird_title = control.get("bird_title", "Avian Visitors")
+        if not isinstance(bird_title, str) or not bird_title.strip():
+            bird_title = "Avian Visitors"
+        bird_subtitle = control.get("bird_subtitle", "Nearby This Week")
+        if not isinstance(bird_subtitle, str) or not bird_subtitle.strip():
+            bird_subtitle = "Nearby This Week"
         return RenderContext(
             orientation=cfg.orientation,
             when=when,
@@ -636,6 +742,12 @@ class FrameRuntime:
             offline=cfg.weather_offline,
             options={
                 "bird_source": cfg.bird_source,
+                "bird_provider": bird_provider,
+                "bird_postal_code": bird_postal_code.strip(),
+                "bird_country": bird_country.strip().casefold(),
+                "bird_lookback_days": bird_lookback_days,
+                "bird_title": bird_title.strip(),
+                "bird_subtitle": bird_subtitle.strip(),
                 "demo_birds": cfg.bird_demo,
                 "avian_repo": str(cfg.avian_weather_repo or ""),
                 "weather_repo": str(cfg.avian_weather_repo or ""),

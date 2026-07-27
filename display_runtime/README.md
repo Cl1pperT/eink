@@ -53,7 +53,8 @@ sudo systemctl start eink-display-render@test-pattern.service
 Use absolute repository paths that the service account can read.
 `repositories.avian_weather` is shared by weather and birds. It must point
 directly at the checkout containing both `weather_frame/renderer.py` and
-`frame/shoot.py`. `repositories.inkystarmap` must point directly at the
+`frame/shoot.py`; regional bird rendering also uses
+`frame/birdweather.py`. `repositories.inkystarmap` must point directly at the
 checkout containing `src/inkystarmap/inkystarmap.py`. If either external repo
 adds Python requirements beyond this package's `integrations` extra, install
 them into `/opt/eink-display/.venv` and rerun `eink-display check` as the
@@ -78,11 +79,12 @@ installer packages neither directory. Do not depend on development discovery
 for the installed systemd service: maintain its checkouts separately and keep
 their readable absolute paths in `/etc/eink-display/runtime.toml`.
 
-`sources.bird` must be the actual AvianVisitors collage page—the page containing
-the `.gtile` bird tiles—not merely the stock BirdNET-Pi dashboard. If the
-BirdNET host only serves its standard dashboard, host/install the AvianVisitors
-frontend there or provide a pre-rendered bird PNG until that integration is
-available.
+Leave `sources.bird` blank for the default keyless BirdWeather integration.
+The validated phone settings provide its postal code, country, lookback, and
+artwork labels, while the real AvianVisitors frontend composes the local bird
+illustrations. The result represents nearby regional reports, not detections at
+the frame. An explicit PNG or AvianVisitors collage URL remains supported for a
+separately operated microphone/BirdNET installation.
 
 Check services, logs, and timers with:
 
@@ -99,20 +101,20 @@ Read its short access code with
 `sudo cat /etc/eink-display/control-panel.token`, then open
 `http://<pi-hostname-or-address>:8765/?token=<code>` on a phone on the same
 trusted LAN. The page removes the token from its address after storing it in
-that browser. It writes only
-`/var/lib/eink-display/control/settings.json` and
-`/var/lib/eink-display/uploads/latest.png`; it cannot rewrite the root-owned
-TOML. Render jobs reload the overlay each time, so changes apply to the next
-weather or uploaded-photo render. Do not expose port 8765 to the public
-internet.
+that browser. It writes settings, optimized uploads, caches, and committed
+frames only below `/var/lib/eink-display`; it cannot rewrite the root-owned
+TOML or application. Authenticated render-now actions and photo uploads use the
+same shared scheduler lock as timer jobs, and the page reports completion or
+failure without blocking an HTTP request. Render jobs reload the overlay each
+time. Do not expose port 8765 to the public internet.
 
 The installed timers render weather at 05:55, birds at 09:55, and the star map
 at 19:55 in the Pi's local timezone, which should match `location.timezone`.
 Each render starts five minutes before the ESP32's 06:00, 10:00, and 20:00
 display boundary so a newly committed frame is normally ready before the mode
 changes, avoiding an unnecessary refresh of yesterday's frame.
-They are persistent across outages and
-share a lock so missed jobs cannot exhaust Pi memory by starting together.
+They are persistent across outages and share a lock—with phone-triggered jobs
+using that same lock—so missed or concurrent renders cannot exhaust Pi memory.
 Failed source renders retry at a bounded interval while the previous committed
 frame remains available to the server.
 These `OnCalendar` values are independent of the TOML automatic-mode schedule;
@@ -176,8 +178,8 @@ The `render` command accepts:
 
 Automatic mode uses the configured local timezone and schedule and never
 allows fixture, demo, sample, or synthetic fallbacks. That prevents a failed
-weather request, BirdNET host, browser, or astronomy dependency from replacing
-a valid physical frame with convincing-looking fake data.
+weather request, BirdWeather request, browser, or astronomy dependency from
+replacing a valid physical frame with convincing-looking fake data.
 
 ## HTTP frame server
 
@@ -214,11 +216,18 @@ The version 1 pull API supports `GET` and `HEAD`:
 | `/v1/frame/<mode>` | Bearer token | EE02 payload referenced by the current manifest |
 | `/v1/frame/<mode>/<sha256>` | Bearer token | Immutable, content-addressed EE02 payload |
 
+`active` is a virtual `<mode>` for the current manifest and frame endpoints.
+It resolves on every request from validated phone settings: a manual selection
+maps directly to its concrete artifact, while `automatic` uses the configured
+timezone and schedule. Responses include `X-Resolved-Mode`. Invalid settings
+or resolver failures receive `503`, and a selected mode with no committed
+artifact receives `404`, so the ESP retains its current image.
+
 Send the token as `Authorization: Bearer <token>`. Missing or incorrect
 credentials receive `401`; an unknown mode or absent committed frame receives
 `404`; and a malformed manifest or missing/corrupt current payload receives
 `503`. The concrete modes are `weather`, `birds`, `star-map`,
-`uploaded-photo`, and `test-pattern`.
+`uploaded-photo`, and `test-pattern`; `active` is the virtual ESP channel.
 
 Manifest ETags identify the exact JSON representation. Frame ETags identify
 the EE02 SHA-256. Responses also carry the frame checksum and wire-format
@@ -329,8 +338,9 @@ absolute repository paths.
 
 - Weather requires a configured or discovered AvianVisitors checkout and real
   provider.
-- A bird URL requires a configured or discovered AvianVisitors checkout and never falls
-  back to fixture species after a capture failure.
+- Blank `sources.bird` requires AvianVisitors' BirdWeather and capture adapters;
+  an explicit bird URL still requires AvianVisitors. Neither path falls back to
+  fixture species after a production capture failure.
 - A live star map requires a configured or discovered inkystarmap checkout and
   Starplot.
 - Explicit bird, star-map, and uploaded-photo files are allowed and recorded

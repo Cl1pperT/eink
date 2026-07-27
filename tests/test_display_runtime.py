@@ -50,6 +50,7 @@ def create_colocated_repositories(project_root: Path) -> None:
     markers = (
         project_root / "peacock" / "AvianVisitors" / "weather_frame" / "renderer.py",
         project_root / "peacock" / "AvianVisitors" / "frame" / "shoot.py",
+        project_root / "peacock" / "AvianVisitors" / "frame" / "birdweather.py",
         project_root
         / "stars"
         / "integrations"
@@ -373,6 +374,38 @@ class FrameRuntimeTests(unittest.TestCase):
             self.assertEqual(runtime.resolve_mode("automatic", night), "star-map")
             with self.assertRaisesRegex(SourcePolicyError, "automatic mode never permits demo"):
                 runtime.render("automatic", when=morning)
+
+    def test_active_mode_uses_control_selection_and_configured_timezone_schedule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            runtime = FrameRuntime(config)
+            morning_utc = datetime.fromisoformat("2026-07-11T15:00:00+00:00")
+            noon_utc = datetime.fromisoformat("2026-07-11T18:00:00+00:00")
+            night_utc = datetime.fromisoformat("2026-07-12T03:00:00+00:00")
+
+            with patch.object(
+                runtime, "_control_settings", return_value={"display_mode": "automatic"}
+            ) as settings:
+                self.assertEqual(runtime.resolve_active_mode(morning_utc), "weather")
+                self.assertEqual(runtime.resolve_active_mode(noon_utc), "birds")
+                self.assertEqual(runtime.resolve_active_mode(night_utc), "star-map")
+            self.assertTrue(
+                all(
+                    call.kwargs == {"fail_closed": True}
+                    for call in settings.call_args_list
+                )
+            )
+
+            with patch.object(
+                runtime, "_control_settings", return_value={"display_mode": "uploaded-photo"}
+            ):
+                self.assertEqual(runtime.resolve_active_mode(night_utc), "uploaded-photo")
+
+            with patch.object(
+                runtime, "_control_settings", return_value={"display_mode": "not-a-mode"}
+            ):
+                with self.assertRaisesRegex(SourcePolicyError, "display.mode"):
+                    runtime.resolve_active_mode(noon_utc)
 
 
 if __name__ == "__main__":

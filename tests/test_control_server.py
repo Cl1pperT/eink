@@ -5,12 +5,13 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from PIL import Image
 
-from display_control.server import ControlServer
+from display_control.server import AsyncRuntimeRenderer, ControlServer, _runtime_config_values
 from display_control.settings import default_settings
 from tests.test_control_settings import sample_catalog
 
@@ -20,6 +21,35 @@ class ControlServerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.catalog = sample_catalog(self.root)
+        self.render_requests = []
+        self.bird_summary = {
+            "provider": "birdweather",
+            "source_label": "Nearby BirdWeather reports",
+            "postal_code": "84601",
+            "country": "us",
+            "lookback_days": 7,
+            "freshness": "fresh",
+            "stale": False,
+            "refreshing": False,
+            "fetched_at": "2026-07-27T12:00:00+00:00",
+            "age_seconds": 5,
+            "species": [
+                {
+                    "scientific_name": "Poecile gambeli",
+                    "common_name": "Mountain Chickadee",
+                    "count": 12,
+                    "slug": "poecile-gambeli",
+                    "art_url": "/bird-art/poecile-gambeli.png",
+                }
+            ],
+            "error": None,
+            "disclaimer": "Regional reports, not local microphone detections.",
+        }
+        bird_cache = type(
+            "StubBirdCache",
+            (),
+            {"get": lambda _self, _settings: dict(self.bird_summary)},
+        )()
         with patch("display_control.server.discover_catalog", return_value=self.catalog):
             try:
                 self.server = ControlServer(
@@ -27,6 +57,9 @@ class ControlServerTests(unittest.TestCase):
                     0,
                     settings_path=self.root / "settings.json",
                     photo_path=self.root / "latest.png",
+                    output_directory=self.root / "frames",
+                    bird_cache=bird_cache,
+                    render_callback=lambda mode: self.render_requests.append(mode) or True,
                     access_token="phone-code",
                 )
             except PermissionError:
@@ -54,6 +87,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'<meta name="viewport"', body)
         self.assertIn(b"Activities", body)
+        self.assertIn(b"Nearby birds", body)
+        self.assertIn(b'id="display-mode"', body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, _headers, body = self.request("GET", "/api/catalog")
         self.assertEqual(status, 200)
@@ -61,6 +96,76 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(len(catalog["locations"]), 2)
         self.assertEqual(len(catalog["activities"]), 2)
         self.assertEqual(self.request("GET", "/../../etc/passwd")[0], 404)
+
+    def test_bird_gallery_summary_local_art_and_safe_committed_preview(self):
+        art = self.root / "avian" / "assets" / "illustrations" / "poecile-gambeli.png"
+        art.parent.mkdir(parents=True)
+        Image.new("RGBA", (12, 8), (20, 80, 50, 255)).save(art)
+        mode = self.root / "frames" / "birds"
+        frame_name = f"{'b' * 64}.rgb.png"
+        preview = mode / "frames" / frame_name
+        preview.parent.mkdir(parents=True)
+        Image.new("RGB", (24, 18), "white").save(preview)
+        (mode / "current.json").write_text(
+            json.dumps(
+                {
+                    "mode": "birds",
+                    "generated_at": "2026-07-27T12:00:00+00:00",
+                    "files": {
+                        "rgb_png": {
+                            "path": f"frames/{frame_name}",
+                            "sha256": "a" * 64,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, _headers, page = self.request("GET", "/birds")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Nearby Birds", page)
+        self.assertIn(b"not claim that a bird visited", page)
+        status, _headers, body = self.request("GET", "/api/birds/summary")
+        summary = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(summary["preview_available"])
+        self.assertEqual(summary["source_label"], "Nearby BirdWeather reports")
+        status, headers, body = self.request("GET", "/api/birds/preview")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(headers["Cache-Control"], "private, no-cache")
+        self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+        etag = headers["ETag"]
+        status, _headers, body = self.request(
+            "GET",
+            "/api/birds/preview",
+            headers={"If-None-Match": etag},
+        )
+        self.assertEqual(status, 304)
+        self.assertEqual(body, b"")
+        status, art_headers, _body = self.request(
+            "GET", "/bird-art/poecile-gambeli.png"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(art_headers["Cache-Control"], "public, max-age=86400")
+        self.assertEqual(self.request("GET", "/bird-art/..%2Fsecret.png")[0], 404)
+
+        (mode / "current.json").write_text(
+            json.dumps(
+                {
+                    "mode": "birds",
+                    "files": {
+                        "rgb_png": {
+                            "path": "../../etc/passwd",
+                            "sha256": "a" * 64,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(self.request("GET", "/api/birds/preview")[0], 404)
 
     def test_mutations_require_token_and_invalid_state_is_not_saved(self):
         settings = default_settings(self.catalog)
@@ -101,6 +206,8 @@ class ControlServerTests(unittest.TestCase):
             "POST", "/api/photo", body, headers
         )
         self.assertEqual(status, 201, response_body)
+        self.assertEqual(self.render_requests, ["uploaded-photo"])
+        self.assertTrue(json.loads(response_body)["render_queued"])
         with Image.open(self.server.photo_path) as saved:
             self.assertEqual(saved.mode, "RGB")
             self.assertEqual(saved.size, (17, 9))
@@ -108,6 +215,79 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertEqual(payload, self.server.photo_path.read_bytes())
+
+    def test_explicit_render_action_is_authenticated_and_concrete(self):
+        body = json.dumps({"mode": "birds"}).encode()
+        headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+        self.assertEqual(self.request("POST", "/api/render", body, headers)[0], 401)
+        headers["X-EInk-Control-Token"] = "phone-code"
+        status, _headers, payload = self.request("POST", "/api/render", body, headers)
+        self.assertEqual(status, 202)
+        self.assertTrue(json.loads(payload)["queued"])
+        self.assertEqual(self.render_requests, ["birds"])
+
+        invalid = json.dumps({"mode": "automatic"}).encode()
+        headers["Content-Length"] = str(len(invalid))
+        self.assertEqual(self.request("POST", "/api/render", invalid, headers)[0], 422)
+
+
+class RuntimeConfigControlPathTests(unittest.TestCase):
+    def test_runtime_config_exposes_weather_photo_and_output_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "runtime.toml"
+            config.write_text(
+                '[repositories]\navian_weather = "AvianVisitors"\n'
+                '[sources]\nphoto = "uploads/latest.png"\n'
+                '[output]\ndirectory = "frames"\n',
+                encoding="utf-8",
+            )
+            weather, photo, output = _runtime_config_values(config)
+            self.assertEqual(weather, (root / "AvianVisitors").resolve())
+            self.assertEqual(photo, (root / "uploads" / "latest.png").resolve())
+            self.assertEqual(output, (root / "frames").resolve())
+
+    def test_async_runtime_renderer_uses_an_argument_vector_without_a_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "runtime.toml"
+            config.write_text("", encoding="utf-8")
+            finished = threading.Event()
+            calls = []
+
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                finished.set()
+                return type("Completed", (), {"returncode": 0})()
+
+            with patch("display_control.server.subprocess.run", side_effect=fake_run):
+                lock = Path(directory) / ".render-scheduler.lock"
+                renderer = AsyncRuntimeRenderer(
+                    config,
+                    command=["eink-display"],
+                    lock_path=lock,
+                )
+                self.assertTrue(renderer.request("uploaded-photo"))
+                self.assertTrue(finished.wait(1))
+
+            command, kwargs = calls[0]
+            self.assertEqual(
+                command,
+                [
+                    "/usr/bin/flock",
+                    "--wait",
+                    "900",
+                    str(lock.resolve()),
+                    "eink-display",
+                    "--config",
+                    str(config.resolve()),
+                    "render",
+                    "uploaded-photo",
+                    "--json",
+                ],
+            )
+            self.assertNotIn("shell", kwargs)
+            self.assertNotIn("stdout", kwargs)
+            self.assertNotIn("stderr", kwargs)
 
 
 if __name__ == "__main__":

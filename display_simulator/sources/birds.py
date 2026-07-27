@@ -36,6 +36,18 @@ class BirdsSource:
         ]
 
     def render(self, context: RenderContext) -> Image.Image:
+        provider = str(context.options.get("bird_provider", "")).strip().casefold()
+        if provider == "birdweather" and not context.options.get("demo_birds", False):
+            repository = find_repository(
+                str(context.options.get("avian_repo", "")),
+                "frame/birdweather.py",
+                "AVIANVISITORS_REPO",
+            )
+            if repository is None:
+                raise RuntimeError(
+                    "BirdWeather rendering needs an AvianVisitors checkout with frame/birdweather.py"
+                )
+            return self._capture_birdweather(repository, context)
         value = str(context.options.get("bird_source", "")).strip()
         if value and not context.options.get("demo_birds", False):
             path = Path(value).expanduser()
@@ -72,9 +84,12 @@ class BirdsSource:
             # shoot.py uses device_scale_factor=2, so these become precisely
             # 1600x1200 landscape (or 1200x1600 portrait) output pixels.
             width, height = context.width // 2, context.height // 2
+            days = int(context.options.get("bird_lookback_days", 7))
+            title = str(context.options.get("bird_title", "Avian Visitors"))
+            subtitle = str(context.options.get("bird_subtitle", "Nearby This Week"))
             command = [str(context.options.get("avian_python") or sys.executable), str(repository / "frame" / "shoot.py"),
                        "--url", url, "--out", str(output), "--width", str(width), "--height", str(height), "--dsf", "2",
-                       "--window-hours", "168", "--subtitle", "Heard This Week"]
+                       "--window-hours", str(days * 24), "--title", title, "--subtitle", subtitle]
             command.extend(self._layout_arguments(context))
             try:
                 completed = subprocess.run(command, cwd=repository, capture_output=True, text=True, timeout=75)
@@ -93,6 +108,68 @@ class BirdsSource:
             self.name = "Birds · AvianVisitors horizontal viewer"
             return captured
 
+    def _capture_birdweather(self, repository: Path, context: RenderContext) -> Image.Image:
+        """Render honest regional BirdWeather data through AvianVisitors."""
+        helper = Path(__file__).resolve().parents[1] / "avian_capture.py"
+        postal_code = str(context.options.get("bird_postal_code", "84601")).strip()
+        country = str(context.options.get("bird_country", "us")).strip().casefold()
+        days = int(context.options.get("bird_lookback_days", 7))
+        title = str(context.options.get("bird_title", "Avian Visitors"))
+        subtitle = str(context.options.get("bird_subtitle", "Nearby This Week"))
+        with tempfile.TemporaryDirectory(prefix="avian-birdweather-simulator-") as directory:
+            output = Path(directory) / "frame.png"
+            command = [
+                str(context.options.get("avian_python") or sys.executable),
+                str(helper),
+                "--repo",
+                str(repository),
+                "--out",
+                str(output),
+                "--width",
+                str(context.width // 2),
+                "--height",
+                str(context.height // 2),
+                "--postal-code",
+                postal_code,
+                "--country",
+                country,
+                "--lookback-days",
+                str(days),
+                "--title",
+                title,
+                "--subtitle",
+                subtitle,
+            ]
+            command.extend(self._layout_arguments(context))
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=repository,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"Nearby BirdWeather render timed out after {exc.timeout} seconds"
+                ) from exc
+            if completed.returncode or not output.is_file():
+                detail = (
+                    completed.stderr.strip()
+                    or completed.stdout.strip()
+                    or f"exit {completed.returncode}"
+                )
+                raise RuntimeError(f"Nearby BirdWeather render failed: {detail}")
+            with Image.open(output) as image:
+                captured = image.convert("RGB")
+        if captured.size != context.orientation.dimensions:
+            raise RuntimeError(
+                f"BirdWeather returned {captured.width}x{captured.height}; "
+                f"expected {context.width}x{context.height}"
+            )
+        self.name = "Birds · nearby BirdWeather reports"
+        return captured
+
     def _capture_avian_demo(self, repository: Path, context: RenderContext, live_unavailable: bool = False) -> Image.Image:
         """Render fixture species through AvianVisitors' actual local frontend."""
         helper = Path(__file__).resolve().parents[1] / "avian_capture.py"
@@ -101,7 +178,9 @@ class BirdsSource:
             command = [str(context.options.get("avian_python") or sys.executable), str(helper),
                        "--repo", str(repository), "--out", str(output),
                        "--width", str(context.width // 2), "--height", str(context.height // 2),
-                       "--window-hours", "168"]
+                       "--window-hours", str(int(context.options.get("bird_lookback_days", 7)) * 24),
+                       "--title", str(context.options.get("bird_title", "Avian Visitors")),
+                       "--subtitle", str(context.options.get("bird_subtitle", "Nearby This Week"))]
             command.extend(self._layout_arguments(context))
             try:
                 completed = subprocess.run(command, cwd=repository, capture_output=True, text=True, timeout=75)
