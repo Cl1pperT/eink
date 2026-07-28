@@ -283,8 +283,9 @@ python3 -m display_runtime esp-sync weather --json
 Use `--server-url http://<pi-address>:8787` when the simulator is not running
 on the Pi. `--state-dir`, `--timeout`, and `--token-file` override the matching
 configuration or credential source. `esp-sync` requires a concrete mode and
-does not run a clock. The production firmware performs its own NTP-backed
-`automatic` selection using the same configured boundaries.
+does not run a clock. Production `automatic` selection stays on the Pi through
+the virtual `active` endpoint. The production firmware's separate NTP-backed
+clock is used only for its once-daily 06:00 battery measurement.
 
 The simulated client stores verified, checksum-named payloads under
 `esp_client.state_directory`, plus atomic `state.json` and `display.ee02`
@@ -381,11 +382,14 @@ The encoder follows Seeed_GFX's EE02 Setup510 and 4bpp `TFT_eSprite` layout:
 - Counter-clockwise maps `(x,y)` to `(y,1599-x)`, matching rotation 3.
 - Portrait 1200×1600 is already in backing order and uses no rotation.
 
-These bytes are sprite-buffer values. Firmware should copy a completely
-downloaded and SHA-256-verified payload into `epaper.getPointer()` and then call
-`epaper.update()`. It must not rotate the already prepared payload again. The
-Seeed driver performs its own later conversion from sprite nibbles to panel
-controller transfer codes.
+These bytes are sprite-buffer values. Firmware copies a completely downloaded
+and SHA-256-verified payload into `epaper.getPointer()`. The production client
+then draws only its device-owned battery signature through Seeed sprite
+rotation 1, using exact black/white nibbles, restores native rotation 0,
+revalidates the physical buffer palette, and calls `epaper.update()`. It does
+not rotate or transform the already prepared base artwork. The Seeed driver
+performs its own later conversion from sprite nibbles to panel controller
+transfer codes.
 
 The compiling PlatformIO/Arduino implementation is in
 [`firmware/esp32-ee02`](../firmware/esp32-ee02/). It targets the XIAO ESP32S3,

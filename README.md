@@ -32,9 +32,13 @@ PlatformIO/Arduino client for the Seeed XIAO ESP32S3, EE02 driver board, and
 ETags, downloads into PSRAM, verifies the exact 960,000-byte payload and
 SHA-256, and refreshes through pinned Seeed_GFX Setup510 only after validation.
 The Pi performs landscape rotation; the ESP32 copies native backing bytes
-without another transform. Every five minutes the ESP32 polls the Pi's virtual
-`active` channel, which resolves either the phone-selected mode or the
-configured morning-weather, daytime-birds, and nighttime-star schedule.
+without transforming the base art. It then adds a discreet, contrast-aware
+handwritten battery estimate in the logical bottom-right corner. The EE02's
+built-in battery divider is sampled once per day at 06:00 using an NTP-backed
+local clock; no external divider is needed. Every five minutes the ESP32 polls
+the Pi's virtual `active` channel, which resolves either the phone-selected
+mode or the configured morning-weather, daytime-birds, and nighttime-star
+schedule.
 
 ```bash
 cd firmware/esp32-ee02

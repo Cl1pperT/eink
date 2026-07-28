@@ -6,11 +6,14 @@
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
+#include <esp_sntp.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/version.h>
 
 #include <cstring>
+#include <ctime>
 
+#include "battery_monitor.h"
 #include "device_config.h"
 #include "frame_contract.h"
 
@@ -42,6 +45,16 @@ static_assert(EINK_HTTP_READ_TIMEOUT_MS > 0 &&
               "HTTPClient read timeout must fit its 16-bit millisecond API");
 static_assert(EINK_CHECK_INTERVAL_SECONDS > 0,
               "EINK_CHECK_INTERVAL_SECONDS must be positive");
+static_assert(EINK_BATTERY_SAMPLE_COUNT >= 3 &&
+                  EINK_BATTERY_SAMPLE_COUNT % 2 == 1,
+              "EINK_BATTERY_SAMPLE_COUNT must be odd and at least three");
+static_assert(EINK_BATTERY_SAMPLE_HOUR >= 0 &&
+                  EINK_BATTERY_SAMPLE_HOUR <= 23,
+              "EINK_BATTERY_SAMPLE_HOUR must be a valid local hour");
+static_assert(EINK_BATTERY_DIVIDER_MULTIPLIER > 0,
+              "EINK_BATTERY_DIVIDER_MULTIPLIER must be positive");
+static_assert(EINK_NTP_RETRY_WAKES > 0,
+              "EINK_NTP_RETRY_WAKES must be positive");
 
 namespace {
 
@@ -50,11 +63,29 @@ constexpr char kPreferenceMode[] = "mode";
 constexpr char kPreferenceSha[] = "sha256";
 constexpr char kPreferenceEtag[] = "etag";
 constexpr char kPreferenceValid[] = "state-valid";
+constexpr char kPreferenceBatteryValid[] = "bat-valid";
+constexpr char kPreferenceBatteryMillivolts[] = "bat-mv";
+constexpr char kPreferenceBatteryPercent[] = "bat-pct";
+constexpr char kPreferenceBatteryDay[] = "bat-day";
+constexpr char kPreferenceBatteryAttemptDay[] = "bat-try";
+constexpr char kPreferenceClockDay[] = "clock-day";
+constexpr char kPreferenceClockAttemptDay[] = "clock-try";
+constexpr char kPreferenceMarkValid[] = "mark-valid";
+constexpr char kPreferenceMarkPercent[] = "mark-pct";
+constexpr char kPreferenceMarkVersion[] = "mark-ver";
+constexpr uint8_t kBatteryMarkVersion = 1;
 constexpr gpio_num_t kButton1 = GPIO_NUM_2;
 constexpr gpio_num_t kButton2 = GPIO_NUM_3;
 constexpr gpio_num_t kButton3 = GPIO_NUM_5;
+constexpr uint8_t kBatteryAdcPin = EINK_BATTERY_ADC_PIN;
+constexpr uint8_t kBatteryEnablePin = EINK_BATTERY_ENABLE_PIN;
 constexpr uint64_t kButtonWakeMask =
     (1ULL << kButton1) | (1ULL << kButton2) | (1ULL << kButton3);
+constexpr time_t kMinimumValidClock = 1704067200;  // 2024-01-01 UTC
+constexpr int16_t kBatteryMarkRightMargin = 18;
+constexpr int16_t kBatteryMarkBottomMargin = 14;
+constexpr int16_t kBatteryMarkSampleWidth = 92;
+constexpr int16_t kBatteryMarkSampleHeight = 42;
 
 EPaper epaper;
 Preferences preferences;
@@ -65,6 +96,23 @@ String displayedSha;
 String displayedEtag;
 bool panelInitialized = false;
 
+struct BatteryState {
+  bool valid = false;
+  uint16_t millivolts = 0;
+  uint8_t percent = 0;
+  uint32_t sampledLocalDay = 0;
+};
+
+BatteryState battery;
+uint32_t batteryAttemptedLocalDay = 0;
+bool displayedBatteryMarkValid = false;
+uint8_t displayedBatteryPercent = 0;
+uint32_t clockSyncedLocalDay = 0;
+uint32_t clockAttemptedLocalDay = 0;
+bool wifiAttemptedThisWake = false;
+RTC_DATA_ATTR uint16_t ntpRetryWakesRemaining = 0;
+RTC_DATA_ATTR bool initialBatteryAttempted = false;
+
 enum class SyncResult {
   kUpdated,
   kNotModified,
@@ -73,6 +121,19 @@ enum class SyncResult {
 
 bool elapsed(uint32_t since, uint32_t duration) {
   return static_cast<uint32_t>(millis() - since) >= duration;
+}
+
+bool readLocalClock(struct tm &localClock) {
+  const time_t now = time(nullptr);
+  if (now < kMinimumValidClock) {
+    return false;
+  }
+  return localtime_r(&now, &localClock) != nullptr;
+}
+
+uint32_t localDayKey(const struct tm &localClock) {
+  return static_cast<uint32_t>(localClock.tm_year + 1900) * 1000UL +
+         static_cast<uint32_t>(localClock.tm_yday + 1);
 }
 
 bool isPlaceholder(const char *value) {
@@ -178,8 +239,196 @@ void loadDisplayState() {
     displayedMode = "";
     displayedSha = "";
     displayedEtag = "";
+    displayedBatteryMarkValid = false;
+    displayedBatteryPercent = 0;
     Serial.println("No valid persisted display checksum; a full pull is required");
+    return;
   }
+
+  const uint8_t persistedMarkPercent =
+      preferences.getUChar(kPreferenceMarkPercent, 0);
+  displayedBatteryMarkValid =
+      preferences.getBool(kPreferenceMarkValid, false) &&
+      preferences.getUChar(kPreferenceMarkVersion, 0) ==
+          kBatteryMarkVersion &&
+      persistedMarkPercent <= 100;
+  displayedBatteryPercent =
+      displayedBatteryMarkValid ? persistedMarkPercent : 0;
+}
+
+void loadBatteryState() {
+  if (!preferencesReady) {
+    return;
+  }
+  clockSyncedLocalDay =
+      preferences.getUInt(kPreferenceClockDay, 0);
+  clockAttemptedLocalDay =
+      preferences.getUInt(kPreferenceClockAttemptDay, 0);
+  const uint16_t persistedMillivolts =
+      preferences.getUShort(kPreferenceBatteryMillivolts, 0);
+  batteryAttemptedLocalDay =
+      preferences.getUInt(kPreferenceBatteryAttemptDay, 0);
+  const uint8_t persistedPercent =
+      preferences.getUChar(kPreferenceBatteryPercent, 0);
+  const bool persistedBatteryIsValid =
+      preferences.getBool(kPreferenceBatteryValid, false) &&
+      eink::isPlausibleBatteryMillivolts(persistedMillivolts) &&
+      persistedPercent <= 100;
+  if (!persistedBatteryIsValid) {
+    Serial.println("No valid cached battery estimate");
+    return;
+  }
+
+  battery.valid = true;
+  battery.millivolts = persistedMillivolts;
+  battery.percent = persistedPercent;
+  battery.sampledLocalDay =
+      preferences.getUInt(kPreferenceBatteryDay, 0);
+  Serial.printf("Cached battery estimate: %u/100 (%u mV)\n",
+                static_cast<unsigned>(battery.percent),
+                static_cast<unsigned>(battery.millivolts));
+}
+
+bool persistBatteryState() {
+  if (!preferencesReady || !battery.valid) {
+    return false;
+  }
+
+  // Battery sampling and physical display commits are intentionally separate.
+  // A failed frame pull must retry the cached percentage without re-reading
+  // the ADC, while state-valid below separately describes physical pixels.
+  const bool invalidated =
+      preferences.putBool(kPreferenceBatteryValid, false) > 0 &&
+      !preferences.getBool(kPreferenceBatteryValid, true);
+  const bool voltageSaved =
+      preferences.putUShort(kPreferenceBatteryMillivolts,
+                            battery.millivolts) > 0;
+  const bool percentSaved =
+      preferences.putUChar(kPreferenceBatteryPercent, battery.percent) > 0;
+  const bool daySaved =
+      preferences.putUInt(kPreferenceBatteryDay,
+                          battery.sampledLocalDay) > 0;
+  const bool fieldsMatch =
+      voltageSaved && percentSaved && daySaved &&
+      preferences.getUShort(kPreferenceBatteryMillivolts, 0) ==
+          battery.millivolts &&
+      preferences.getUChar(kPreferenceBatteryPercent, 255) ==
+          battery.percent &&
+      preferences.getUInt(kPreferenceBatteryDay, UINT32_MAX) ==
+          battery.sampledLocalDay;
+  const bool committed =
+      invalidated && fieldsMatch &&
+      preferences.putBool(kPreferenceBatteryValid, true) > 0 &&
+      preferences.getBool(kPreferenceBatteryValid, false);
+  if (!committed) {
+    preferences.putBool(kPreferenceBatteryValid, false);
+    Serial.println(
+        "Warning: battery estimate was not committed; it will be sampled again");
+  }
+  return committed;
+}
+
+bool readBatteryMillivolts(uint16_t &batteryMillivolts) {
+  uint32_t samples[EINK_BATTERY_SAMPLE_COUNT];
+
+  analogReadResolution(12);
+  analogSetPinAttenuation(kBatteryAdcPin, ADC_11db);
+  digitalWrite(kBatteryEnablePin, HIGH);
+  delay(EINK_BATTERY_SETTLE_MS);
+  // Discard the first conversion after switching on the divider.
+  analogReadMilliVolts(kBatteryAdcPin);
+
+  for (size_t index = 0; index < EINK_BATTERY_SAMPLE_COUNT; ++index) {
+    samples[index] = analogReadMilliVolts(kBatteryAdcPin);
+    delay(2);
+  }
+  digitalWrite(kBatteryEnablePin, LOW);
+
+  // Insertion sort is small and deterministic for the default 25 readings.
+  for (size_t index = 1; index < EINK_BATTERY_SAMPLE_COUNT; ++index) {
+    const uint32_t value = samples[index];
+    size_t position = index;
+    while (position > 0 && samples[position - 1] > value) {
+      samples[position] = samples[position - 1];
+      --position;
+    }
+    samples[position] = value;
+  }
+
+  const uint32_t adcMillivolts =
+      samples[EINK_BATTERY_SAMPLE_COUNT / 2];
+  const uint32_t measuredBatteryMillivolts =
+      adcMillivolts * EINK_BATTERY_DIVIDER_MULTIPLIER;
+  if (!eink::isPlausibleBatteryMillivolts(measuredBatteryMillivolts)) {
+    Serial.printf(
+        "Battery ADC reading is not plausible (%lu mV); cached estimate kept\n",
+        static_cast<unsigned long>(measuredBatteryMillivolts));
+    return false;
+  }
+
+  batteryMillivolts =
+      static_cast<uint16_t>(measuredBatteryMillivolts);
+  return true;
+}
+
+void persistBatteryAttemptDay() {
+  if (!preferencesReady || batteryAttemptedLocalDay == 0) {
+    return;
+  }
+  const bool saved =
+      preferences.putUInt(kPreferenceBatteryAttemptDay,
+                          batteryAttemptedLocalDay) > 0 &&
+      preferences.getUInt(kPreferenceBatteryAttemptDay, 0) ==
+          batteryAttemptedLocalDay;
+  if (!saved) {
+    Serial.println("Warning: battery attempt date was not persisted");
+  }
+}
+
+void sampleBatteryIfDue(const struct tm *localClock) {
+  const bool hasLocalDay = localClock != nullptr;
+  const bool isDailyWindow =
+      hasLocalDay && localClock->tm_hour >= EINK_BATTERY_SAMPLE_HOUR;
+  const uint32_t today =
+      hasLocalDay ? localDayKey(*localClock) : 0;
+  const eink::BatterySampleDecision decision =
+      eink::decideBatterySample(
+          hasLocalDay, hasLocalDay ? localClock->tm_hour : 0, today,
+          batteryAttemptedLocalDay, battery.valid,
+          initialBatteryAttempted, EINK_BATTERY_SAMPLE_HOUR);
+  if (!decision.due) {
+    return;
+  }
+
+  initialBatteryAttempted = true;
+  if (decision.daily) {
+    batteryAttemptedLocalDay = today;
+    persistBatteryAttemptDay();
+  }
+
+  uint16_t measuredMillivolts = 0;
+  if (!readBatteryMillivolts(measuredMillivolts)) {
+    return;
+  }
+
+  battery.valid = true;
+  battery.millivolts = measuredMillivolts;
+  battery.percent = eink::estimateBatteryPercent(measuredMillivolts);
+  // A first-boot estimate before 06:00 is immediately useful, but day zero
+  // ensures the normal 06:00 reading still happens on that local date.
+  if (decision.daily) {
+    battery.sampledLocalDay = today;
+  }
+  persistBatteryState();
+  Serial.printf("Battery estimate sampled: %u/100 (%u mV)\n",
+                static_cast<unsigned>(battery.percent),
+                static_cast<unsigned>(battery.millivolts));
+}
+
+bool batteryMarkNeedsRefresh() {
+  return battery.valid != displayedBatteryMarkValid ||
+         (battery.valid &&
+          displayedBatteryPercent != battery.percent);
 }
 
 bool invalidatePersistedDisplayState() {
@@ -213,10 +462,25 @@ void persistDisplayState(const String &mode, const String &sha,
   const bool shaSaved = preferences.putString(kPreferenceSha, sha) > 0;
   const bool etagSaved = preferences.putString(kPreferenceEtag, etag) > 0;
   const bool modeSaved = preferences.putString(kPreferenceMode, mode) > 0;
+  const bool markValidSaved =
+      preferences.putBool(kPreferenceMarkValid, battery.valid) > 0;
+  const bool markPercentSaved =
+      preferences.putUChar(kPreferenceMarkPercent,
+                           battery.valid ? battery.percent : 0) > 0;
+  const bool markVersionSaved =
+      preferences.putUChar(kPreferenceMarkVersion, kBatteryMarkVersion) > 0;
   const bool fieldsMatch = shaSaved && etagSaved && modeSaved &&
+                           markValidSaved && markPercentSaved &&
+                           markVersionSaved &&
                            preferences.getString(kPreferenceSha, "") == sha &&
                            preferences.getString(kPreferenceEtag, "") == etag &&
-                           preferences.getString(kPreferenceMode, "") == mode;
+                           preferences.getString(kPreferenceMode, "") == mode &&
+                           preferences.getBool(kPreferenceMarkValid, false) ==
+                               battery.valid &&
+                           preferences.getUChar(kPreferenceMarkPercent, 255) ==
+                               (battery.valid ? battery.percent : 0) &&
+                           preferences.getUChar(kPreferenceMarkVersion, 0) ==
+                               kBatteryMarkVersion;
   const bool committed =
       fieldsMatch && preferences.putBool(kPreferenceValid, true) > 0 &&
       preferences.getBool(kPreferenceValid, false);
@@ -224,7 +488,11 @@ void persistDisplayState(const String &mode, const String &sha,
     preferences.putBool(kPreferenceValid, false);
     Serial.println(
         "Warning: display checksum remains invalid; next boot will pull fully");
+    return;
   }
+
+  displayedBatteryMarkValid = battery.valid;
+  displayedBatteryPercent = battery.valid ? battery.percent : 0;
 }
 
 void persistModeForUnchangedFrame(const String &mode) {
@@ -244,6 +512,11 @@ bool connectWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     return true;
   }
+  if (wifiAttemptedThisWake) {
+    Serial.println("Wi-Fi already failed during this wake");
+    return false;
+  }
+  wifiAttemptedThisWake = true;
 
   Serial.print("Connecting to Wi-Fi");
   WiFi.mode(WIFI_STA);
@@ -264,6 +537,96 @@ bool connectWifi() {
   }
   Serial.print("Wi-Fi connected at ");
   Serial.println(WiFi.localIP());
+  return true;
+}
+
+bool synchronizeClockIfDue(struct tm &localClock) {
+  const bool hadValidClock = readLocalClock(localClock);
+  const uint32_t currentLocalDay =
+      hadValidClock ? localDayKey(localClock) : 0;
+  if (hadValidClock && clockSyncedLocalDay == currentLocalDay) {
+    return true;
+  }
+  if (hadValidClock &&
+      clockAttemptedLocalDay == currentLocalDay) {
+    Serial.println(
+        "Daily NTP attempt already completed; using the retained clock");
+    return true;
+  }
+  if (!hadValidClock && ntpRetryWakesRemaining > 0) {
+    --ntpRetryWakesRemaining;
+    Serial.printf(
+        "NTP retry backed off for %u more wake cycles\n",
+        static_cast<unsigned>(ntpRetryWakesRemaining));
+    return false;
+  }
+
+  if (hadValidClock) {
+    clockAttemptedLocalDay = currentLocalDay;
+    const bool attemptSaved =
+        preferencesReady &&
+        preferences.putUInt(kPreferenceClockAttemptDay,
+                            clockAttemptedLocalDay) > 0 &&
+        preferences.getUInt(kPreferenceClockAttemptDay, 0) ==
+            clockAttemptedLocalDay;
+    if (!attemptSaved) {
+      Serial.println("Warning: NTP attempt date was not persisted");
+    }
+  }
+  if (!connectWifi()) {
+    if (!hadValidClock) {
+      ntpRetryWakesRemaining = EINK_NTP_RETRY_WAKES;
+    }
+    Serial.println(
+        "Clock sync unavailable; using the retained clock if present");
+    return hadValidClock;
+  }
+
+  Serial.println("Synchronizing the local clock with NTP");
+  configTzTime(EINK_TIMEZONE, EINK_NTP_SERVER_PRIMARY,
+               EINK_NTP_SERVER_SECONDARY);
+  const uint32_t started = millis();
+  bool syncCompleted = false;
+  while (!elapsed(started, EINK_NTP_SYNC_TIMEOUT_MS)) {
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+      syncCompleted = true;
+      break;
+    }
+    delay(100);
+  }
+
+  struct tm synchronizedClock {};
+  const bool synchronized =
+      syncCompleted && readLocalClock(synchronizedClock);
+  if (!synchronized) {
+    if (!hadValidClock) {
+      ntpRetryWakesRemaining = EINK_NTP_RETRY_WAKES;
+    }
+    Serial.println(
+        "NTP timed out; retained clock will keep the approximate schedule");
+    return readLocalClock(localClock) || hadValidClock;
+  }
+
+  ntpRetryWakesRemaining = 0;
+  localClock = synchronizedClock;
+  clockSyncedLocalDay = localDayKey(localClock);
+  clockAttemptedLocalDay = clockSyncedLocalDay;
+  const bool saved =
+      preferencesReady &&
+      preferences.putUInt(kPreferenceClockDay, clockSyncedLocalDay) > 0 &&
+      preferences.putUInt(kPreferenceClockAttemptDay,
+                          clockAttemptedLocalDay) > 0 &&
+      preferences.getUInt(kPreferenceClockDay, 0) ==
+          clockSyncedLocalDay &&
+      preferences.getUInt(kPreferenceClockAttemptDay, 0) ==
+          clockAttemptedLocalDay;
+  if (!saved) {
+    Serial.println("Warning: NTP sync date was not persisted");
+  }
+  Serial.printf("Clock synchronized: %04d-%02d-%02d %02d:%02d:%02d\n",
+                localClock.tm_year + 1900, localClock.tm_mon + 1,
+                localClock.tm_mday, localClock.tm_hour,
+                localClock.tm_min, localClock.tm_sec);
   return true;
 }
 
@@ -332,20 +695,92 @@ bool readExactFrame(HTTPClient &http, uint8_t *destination) {
   return offset == eink::kFrameBytes;
 }
 
-bool refreshPanel(const uint8_t *verifiedFrame) {
-  // The Pi has already rotated landscape pixels into the native 1200x1600
-  // Setup510 backing order. Do not call setRotation(), pushImage(), or convert
-  // nibbles here.
-  if (!panelInitialized) {
-    epaper.begin();
-    panelInitialized = true;
+uint8_t backingColorAtLogical(const uint8_t *frame, int16_t logicalX,
+                              int16_t logicalY) {
+  if (logicalX < 0 ||
+      logicalX >= static_cast<int16_t>(eink::kBackingHeight) ||
+      logicalY < 0 ||
+      logicalY >= static_cast<int16_t>(eink::kBackingWidth)) {
+    return TFT_WHITE;
   }
+
+  // The Pi rotates its 1600x1200 landscape canvas clockwise into the native
+  // 1200x1600 backing: logical (x,y) -> backing (1199-y,x).
+  const size_t pixelIndex = eink::clockwiseBackingPixelIndex(
+      static_cast<size_t>(logicalX), static_cast<size_t>(logicalY),
+      eink::kBackingWidth);
+  const uint8_t packed = frame[pixelIndex / 2];
+  return pixelIndex % 2 == 0 ? packed >> 4 : packed & 0x0F;
+}
+
+uint16_t batteryMarkInk(const uint8_t *frame) {
+  const int16_t logicalWidth =
+      static_cast<int16_t>(eink::kBackingHeight);
+  const int16_t logicalHeight =
+      static_cast<int16_t>(eink::kBackingWidth);
+  const int16_t right = logicalWidth - kBatteryMarkRightMargin;
+  const int16_t bottom = logicalHeight - kBatteryMarkBottomMargin;
+  size_t lightSamples = 0;
+  size_t darkSamples = 0;
+
+  for (int16_t y = bottom - kBatteryMarkSampleHeight; y <= bottom;
+       y += 3) {
+    for (int16_t x = right - kBatteryMarkSampleWidth; x <= right;
+         x += 3) {
+      const uint8_t color = backingColorAtLogical(frame, x, y);
+      if (color == TFT_WHITE || color == TFT_YELLOW) {
+        ++lightSamples;
+      } else {
+        ++darkSamples;
+      }
+    }
+  }
+  return lightSamples >= darkSamples ? TFT_BLACK : TFT_WHITE;
+}
+
+void applyBatteryMark(uint8_t *displayBuffer) {
+  if (!battery.valid) {
+    return;
+  }
+
+  char mark[8];
+  snprintf(mark, sizeof(mark), "%u/100",
+           static_cast<unsigned>(battery.percent));
+  const uint16_t ink = batteryMarkInk(displayBuffer);
+
+  // Satisfy's digit ink is about 19 pixels tall on this panel (roughly 9 pt).
+  // Drawing through the 4bpp sprite writes exact black/white nibbles without
+  // antialiasing, keeping the server frame palette contract intact.
+  epaper.setRotation(1);
+  epaper.setFreeFont(&Satisfy_24);
+  epaper.setTextSize(1);
+  epaper.setTextDatum(BR_DATUM);
+  epaper.setTextColor(ink);
+  epaper.drawString(mark, epaper.width() - kBatteryMarkRightMargin,
+                    epaper.height() - kBatteryMarkBottomMargin);
+  epaper.setTextDatum(TL_DATUM);
+  epaper.setTextFont(1);
+  epaper.setRotation(0);
+}
+
+bool refreshPanel(const uint8_t *verifiedFrame) {
+  // The base frame remains byte-for-byte verified against the server. Only the
+  // small device-owned battery signature is drawn after that verification.
   auto *displayBuffer = static_cast<uint8_t *>(epaper.getPointer());
   if (displayBuffer == nullptr) {
     Serial.println("Seeed_GFX framebuffer allocation failed");
     return false;
   }
   memcpy(displayBuffer, verifiedFrame, eink::kFrameBytes);
+  applyBatteryMark(displayBuffer);
+  if (!eink::hasOnlySupportedColors(displayBuffer, eink::kFrameBytes)) {
+    Serial.println("Battery mark produced an invalid display color");
+    return false;
+  }
+  if (!panelInitialized) {
+    epaper.begin();
+    panelInitialized = true;
+  }
   epaper.update();
   return true;
 }
@@ -354,6 +789,9 @@ SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
   if (!eink::isFrameChannel(mode)) {
     Serial.println("Refusing an unsupported frame mode");
     return SyncResult::kFailed;
+  }
+  if (batteryMarkNeedsRefresh()) {
+    bypassValidator = true;
   }
   if (!connectWifi()) {
     return SyncResult::kFailed;
@@ -482,7 +920,8 @@ SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
 
   // A compliant server returns 304 for this case. This second guard also
   // prevents a redundant physical refresh behind a proxy that returned 200.
-  if (actualSha == displayedSha && etag == displayedEtag) {
+  if (actualSha == displayedSha && etag == displayedEtag &&
+      !batteryMarkNeedsRefresh()) {
     heap_caps_free(staging);
     if (displayedMode != mode) {
       persistModeForUnchangedFrame(mode);
@@ -517,10 +956,39 @@ bool anyButtonIsPressed() {
          digitalRead(kButton3) == LOW;
 }
 
+uint64_t nextTimerWakeSeconds() {
+  uint64_t wakeSeconds = EINK_CHECK_INTERVAL_SECONDS;
+  struct tm localClock {};
+  if (!readLocalClock(localClock) ||
+      batteryAttemptedLocalDay == localDayKey(localClock) ||
+      localClock.tm_hour >= EINK_BATTERY_SAMPLE_HOUR) {
+    return wakeSeconds;
+  }
+
+  struct tm target = localClock;
+  target.tm_hour = EINK_BATTERY_SAMPLE_HOUR;
+  target.tm_min = 0;
+  target.tm_sec = 0;
+  target.tm_isdst = -1;
+  const time_t targetTime = mktime(&target);
+  const time_t now = time(nullptr);
+  if (targetTime <= now) {
+    return wakeSeconds;
+  }
+  const uint64_t untilTarget =
+      static_cast<uint64_t>(targetTime - now);
+  if (untilTarget > 0 && untilTarget < wakeSeconds) {
+    wakeSeconds = untilTarget;
+  }
+  return wakeSeconds;
+}
+
 void sleepUntilButton() {
+  const uint64_t timerWakeSeconds = nextTimerWakeSeconds();
   MDNS.end();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  digitalWrite(kBatteryEnablePin, LOW);
   if (preferencesReady) {
     preferences.end();
     preferencesReady = false;
@@ -533,10 +1001,10 @@ void sleepUntilButton() {
   }
 
   esp_sleep_enable_ext1_wakeup(kButtonWakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
-  esp_sleep_enable_timer_wakeup(EINK_CHECK_INTERVAL_SECONDS * 1000000ULL);
+  esp_sleep_enable_timer_wakeup(timerWakeSeconds * 1000000ULL);
   Serial.printf(
       "Sleeping; checking again in %llu seconds or on any user button\n",
-      EINK_CHECK_INTERVAL_SECONDS);
+      timerWakeSeconds);
   Serial.flush();
   delay(20);
   esp_deep_sleep_start();
@@ -549,12 +1017,16 @@ void setup() {
   pinMode(kButton1, INPUT_PULLUP);
   pinMode(kButton2, INPUT_PULLUP);
   pinMode(kButton3, INPUT_PULLUP);
+  pinMode(kBatteryEnablePin, OUTPUT);
+  digitalWrite(kBatteryEnablePin, LOW);
+  setenv("TZ", EINK_TIMEZONE, 1);
+  tzset();
   delay(750);
-  Serial.println("EE02 button image updater starting");
+  Serial.println("EE02 image and daily battery updater starting");
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
     Serial.println("Wake reason: user button");
   } else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-    Serial.println("Wake reason: five-minute timer");
+    Serial.println("Wake reason: scheduled timer");
   } else {
     Serial.println("Wake reason: power-on, reset, or upload");
   }
@@ -579,12 +1051,30 @@ void setup() {
     sleepUntilButton();
     return;
   }
+  loadBatteryState();
   loadDisplayState();
 
   if (!configurationIsUsable()) {
     sleepUntilButton();
     return;
   }
+
+  struct tm localClock {};
+  const bool retainedClockWasValid = readLocalClock(localClock);
+  if (retainedClockWasValid) {
+    // On ordinary deep-sleep wakes this happens before Wi-Fi or panel load.
+    sampleBatteryIfDue(&localClock);
+  }
+  const bool clockIsReady = synchronizeClockIfDue(localClock);
+  if (clockIsReady) {
+    // Re-evaluate in case NTP crossed an hour/date boundary.
+    sampleBatteryIfDue(&localClock);
+  } else if (!retainedClockWasValid) {
+    // First boot without internet still gets a useful estimate. Day zero makes
+    // it eligible again once a trustworthy 06:00 local time is available.
+    sampleBatteryIfDue(nullptr);
+  }
+
   syncFrame(EINK_FRAME_MODE);
   sleepUntilButton();
 }

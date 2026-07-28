@@ -73,6 +73,21 @@ class ESP32ContractParityTests(unittest.TestCase):
         self.assertEqual(frame_etag(digest), f'"sha256-{digest}"')
         self.assertIn('String("\\"sha256-") + sha + "\\""', self.source)
 
+    def test_battery_mark_uses_the_runtime_clockwise_coordinate_mapping(self):
+        self.assertEqual(self.defaults["ee02"]["landscape_rotation"], "clockwise")
+        self.assertIn(
+            "eink::clockwiseBackingPixelIndex(",
+            self.source,
+        )
+        self.assertIn("epaper.setRotation(1)", self.source)
+
+    def test_esp_timezone_matches_the_pi_default(self):
+        self.assertEqual(self.defaults["location"]["timezone"], "America/Denver")
+        self.assertIn(
+            '#define EINK_TIMEZONE "MST7MDT,M3.2.0,M11.1.0"',
+            self.device_config,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
