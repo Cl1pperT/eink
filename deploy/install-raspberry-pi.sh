@@ -55,8 +55,8 @@ usage() {
     cat <<'EOF'
 Usage: sudo ./deploy/install-raspberry-pi.sh [options]
 
-Installs the Python runtime into /opt, configuration and a generated bearer
-token into /etc, state under /var/lib, and systemd services/timers.
+Installs the Python runtime into /opt, configuration and a generated
+frame-server token into /etc, state under /var/lib, and systemd services/timers.
 
 Options:
   --install-dir DIR       Application/venv directory (default /opt/eink-display)
@@ -70,7 +70,7 @@ Options:
   --no-enable             Install units without enabling or starting them
   --no-start              Enable units but do not start/restart them
   --force-config          Back up and replace an existing runtime.toml
-  --rotate-token          Replace frame and phone tokens (ESP clients must be updated)
+  --rotate-token          Replace the frame-server token (ESP clients must be updated)
   --allow-unsupported     Permit non-Pi/non-aarch64 live installation
   --destdir DIR           Rootless staged filesystem install; skips apt/pip/systemd
   --uninstall             Remove application and units; preserve config/state
@@ -78,9 +78,9 @@ Options:
   --dry-run               Validate and describe the operation without writing
   -h, --help              Show this help
 
-Rerunning the installer is safe: operator configuration, access tokens, frame
-state, and external repositories are preserved unless an explicit replacement
-flag is supplied.
+Rerunning the installer is safe: operator configuration, the frame-server
+token, frame state, and external repositories are preserved unless an explicit
+replacement flag is supplied.
 EOF
 }
 
@@ -212,17 +212,15 @@ STATE_FS="$(fs_path "$STATE_DIR")"
 UNIT_FS="$(fs_path /etc/systemd/system)"
 CONFIG_PATH="$CONFIG_DIR/runtime.toml"
 TOKEN_FILE="$CONFIG_DIR/frame-server.token"
-CONTROL_TOKEN_FILE="$CONFIG_DIR/control-panel.token"
 CONFIG_PATH_FS="$(fs_path "$CONFIG_PATH")"
 TOKEN_FILE_FS="$(fs_path "$TOKEN_FILE")"
-CONTROL_TOKEN_FILE_FS="$(fs_path "$CONTROL_TOKEN_FILE")"
 
 if "$DRY_RUN"; then
     action="install"
     "$UNINSTALL" && action="uninstall"
     log "dry run: would $action runtime at $INSTALL_DIR"
     log "dry run: config=$CONFIG_PATH state=$STATE_DIR user=$SERVICE_USER:$SERVICE_GROUP"
-    "$ROTATE_TOKEN" && log "dry run: would rotate the access tokens without printing them"
+    "$ROTATE_TOKEN" && log "dry run: would rotate the frame-server token without printing it"
     exit 0
 fi
 
@@ -411,37 +409,8 @@ install_token() {
     fi
 }
 
-install_control_token() {
-    reject_symlink "$CONTROL_TOKEN_FILE_FS" "control-panel token"
-    if [[ -e "$CONTROL_TOKEN_FILE_FS" && "$ROTATE_TOKEN" == false ]]; then
-        log "preserving existing control-panel token"
-    else
-        temporary="$(mktemp "$CONFIG_FS/.control-panel.token.XXXXXX")"
-        # A 48-bit code is short enough to enter on a phone while remaining
-        # impractical to guess on a trusted home LAN.
-        (umask 0077; python3 -c 'import secrets; print(secrets.token_hex(6))' >"$temporary")
-        grep -Eq '^[0-9a-f]{12}$' "$temporary" \
-            || die "could not generate a valid control-panel token"
-        chmod 0640 "$temporary"
-        if [[ -z "$DESTDIR" ]]; then
-            chown root:"$SERVICE_GROUP" "$temporary"
-        fi
-        mv -f -- "$temporary" "$CONTROL_TOKEN_FILE_FS"
-        if "$ROTATE_TOKEN"; then
-            log "rotated the control-panel token"
-        else
-            log "generated a control-panel token at $CONTROL_TOKEN_FILE (value not printed)"
-        fi
-    fi
-    chmod 0640 "$CONTROL_TOKEN_FILE_FS"
-    if [[ -z "$DESTDIR" ]]; then
-        chown root:"$SERVICE_GROUP" "$CONTROL_TOKEN_FILE_FS"
-    fi
-}
-
 install_configuration
 install_token
-install_control_token
 
 install -d -m 0755 "$INSTALL_FS/display_runtime"
 install -m 0644 "$SOURCE_DIR/README.md" "$INSTALL_FS/README.md"
@@ -468,7 +437,6 @@ render_units() {
             -e "s|@EINK_INSTALL_DIR@|$INSTALL_DIR|g" \
             -e "s|@EINK_CONFIG_PATH@|$CONFIG_PATH|g" \
             -e "s|@EINK_TOKEN_FILE@|$TOKEN_FILE|g" \
-            -e "s|@EINK_CONTROL_TOKEN_FILE@|$CONTROL_TOKEN_FILE|g" \
             -e "s|@EINK_STATE_DIR@|$STATE_DIR|g" \
             "$source" >"$temporary"
         if grep -q '@EINK_' "$temporary"; then
@@ -679,7 +647,6 @@ cat >"$INSTALL_FS/INSTALLATION" <<EOF
 Managed by install-raspberry-pi.sh
 config=$CONFIG_PATH
 token=$TOKEN_FILE
-control_token=$CONTROL_TOKEN_FILE
 state=$STATE_DIR
 user=$SERVICE_USER
 group=$SERVICE_GROUP
@@ -721,4 +688,4 @@ fi
 log "installation complete"
 log "edit $CONFIG_PATH, then run: systemctl start eink-display-render@MODE.service"
 log "retrieve the token securely from $TOKEN_FILE and provision it on the ESP32"
-log "open the phone control panel on port 8765; its access code is in $CONTROL_TOKEN_FILE"
+log "open the phone control panel on port 8765 from the trusted local network"

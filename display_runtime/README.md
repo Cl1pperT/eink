@@ -29,7 +29,6 @@ are:
 /opt/eink-display/                  application, venv, browser
 /etc/eink-display/runtime.toml      operator configuration
 /etc/eink-display/frame-server.token
-/etc/eink-display/control-panel.token
 /var/lib/eink-display/              atomic frames, cache, uploads, phone settings
 ```
 
@@ -97,16 +96,17 @@ journalctl -u 'eink-display-render@star-map.service'
 ```
 
 The installer also starts a phone-friendly configuration site on port 8765.
-Read its short access code with
-`sudo cat /etc/eink-display/control-panel.token`, then open
-`http://<pi-hostname-or-address>:8765/?token=<code>` on a phone on the same
-trusted LAN. The page removes the token from its address after storing it in
-that browser. It writes settings, optimized uploads, caches, and committed
-frames only below `/var/lib/eink-display`; it cannot rewrite the root-owned
-TOML or application. Authenticated render-now actions and photo uploads use the
-same shared scheduler lock as timer jobs, and the page reports completion or
-failure without blocking an HTTP request. Render jobs reload the overlay each
-time. Do not expose port 8765 to the public internet.
+Open `http://<pi-hostname-or-address>:8765/` on a phone on the same trusted LAN;
+no pairing code, login, or control-panel token is required. Any device on that
+LAN can use the website and its control API to change settings, upload images,
+start demos, or queue renders. If multiple phones edit concurrently, the last
+valid save wins, so refresh before making another change. The service writes
+settings, optimized uploads, caches, and committed frames only below
+`/var/lib/eink-display`; it cannot rewrite the root-owned TOML or application.
+Render-now actions and photo uploads use the same shared scheduler lock as
+timer jobs, and the page reports completion or failure without blocking an HTTP
+request. Render jobs reload the overlay each time. Do not expose port 8765 to
+the public internet.
 
 The Stars tab safely previews the latest committed sky frame and persists a
 North, East, South, or West center direction for scheduled and manual renders.
@@ -120,7 +120,7 @@ committed `star-map` frame.
 
 The Overview page and Stars tab **Five-minute demo** controls select the latest
 committed Weather, Birds, Stars, or uploaded Image artifact; they do not render
-new artwork. The authenticated action writes a fixed-duration UTC sidecar at
+new artwork. The control-panel action writes a fixed-duration UTC sidecar at
 `/var/lib/eink-display/control/demo-override.json`; it does not modify
 `settings.json`, and the browser cannot choose a longer duration. Press the
 ESP32's physical button to see the selection immediately. Expired, absent, or

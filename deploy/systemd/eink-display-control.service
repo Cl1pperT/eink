@@ -6,7 +6,6 @@ After=network-online.target
 ConditionPathIsDirectory=@EINK_INSTALL_DIR@
 ConditionPathIsDirectory=@EINK_STATE_DIR@/control
 ConditionPathExists=@EINK_CONFIG_PATH@
-ConditionPathExists=@EINK_CONTROL_TOKEN_FILE@
 StartLimitIntervalSec=5min
 StartLimitBurst=12
 
@@ -23,14 +22,14 @@ Environment=STARPLOT_DATA_PATH=@EINK_STATE_DIR@/cache/starplot
 Environment=MPLBACKEND=Agg
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=@EINK_INSTALL_DIR@/.venv/bin/eink-display-control --host 0.0.0.0 --port 8765 --runtime-config @EINK_CONFIG_PATH@ --settings @EINK_STATE_DIR@/control/settings.json --photo @EINK_STATE_DIR@/uploads/latest.png --access-token-file @EINK_CONTROL_TOKEN_FILE@
+ExecStart=@EINK_INSTALL_DIR@/.venv/bin/eink-display-control --host 0.0.0.0 --port 8765 --runtime-config @EINK_CONFIG_PATH@ --settings @EINK_STATE_DIR@/control/settings.json --photo @EINK_STATE_DIR@/uploads/latest.png
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=15s
 UMask=0077
 
 # Settings, uploads, BirdWeather/browser caches, and atomically committed
-# frames are writable because authenticated phone actions can queue the same
+# frames are writable because phone actions can queue the same
 # renderer used by the timers. Runtime config and application code stay
 # root-owned and read-only.
 NoNewPrivileges=true

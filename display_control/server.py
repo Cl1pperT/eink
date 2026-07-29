@@ -6,7 +6,6 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
-import hmac
 import io
 import json
 import os
@@ -137,7 +136,7 @@ INDEX_HTML = r"""<!doctype html>
 
       <article class="card compact">
         <div class="card-title"><div><p class="eyebrow">Control panel</p><h3>Keep this address handy</h3></div><span class="success-dot"></span></div>
-        <p class="muted">Add this page to your phone’s Home Screen while your phone and frame are on the same Wi-Fi.</p>
+        <p class="muted">Anyone on this trusted Wi-Fi can make changes without signing in. Add this page to your phone’s Home Screen for quick access.</p>
       </article>
     </section>
 
@@ -262,16 +261,15 @@ APP_JS = r"""
   const demoLabels={weather:'Weather',birds:'Birds','star-map':'Stars','uploaded-photo':'Image'};
   const starDirectionLabels={north:'North',east:'East',south:'South',west:'West'};
   const starDirectionCardinals={north:'N',east:'E',south:'S',west:'W'};
-  let catalog=null, settings=null, baseline='', photoAvailable=false, token='', birdSummaryTimer=null, starSummaryTimer=null, starSummary=null, renderPollTimer=null, demoState=null, demoDeadline=0, demoTimer=null, demoBusy=false;
+  let catalog=null, settings=null, baseline='', photoAvailable=false, birdSummaryTimer=null, starSummaryTimer=null, starSummary=null, renderPollTimer=null, demoState=null, demoDeadline=0, demoTimer=null, demoBusy=false;
 
-  function acquireToken(){
-    const url=new URL(location.href); const supplied=url.searchParams.get('token');
-    let stored='';try{if(supplied)localStorage.setItem('eink-control-token',supplied);stored=localStorage.getItem('eink-control-token')||''}catch(_error){}
-    if(supplied){url.searchParams.delete('token');history.replaceState(null,'',url.pathname+(url.searchParams.toString()?'?'+url.searchParams:''));}
-    token=supplied||stored;
+  function clearLegacyToken(){
+    const url=new URL(location.href);
+    if(url.searchParams.has('token')){url.searchParams.delete('token');history.replaceState(null,'',url.pathname+(url.searchParams.toString()?'?'+url.searchParams:''));}
+    try{localStorage.removeItem('eink-control-token')}catch(_error){}
   }
   async function api(path, options={}){
-    const headers=new Headers(options.headers||{}); if(token)headers.set('X-EInk-Control-Token',token);
+    const headers=new Headers(options.headers||{});
     const response=await fetch(path,{...options,headers,cache:'no-store'});
     const type=response.headers.get('content-type')||''; const value=type.includes('application/json')?await response.json():await response.text();
     if(!response.ok)throw new Error(value.error||value||`Request failed (${response.status})`); return value;
@@ -447,7 +445,7 @@ APP_JS = r"""
     try{$('#save').disabled=true;settings=await api('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(settings)});baseline=snapshot();$('#save-bar').classList.add('hidden');updateRenderButton();loadBirdSummary();if(showToast)toast('Saved to your frame')}
     catch(error){toast(error.message,true);throw error}finally{$('#save').disabled=false}
   }
-  async function resetAll(){if(!confirm('Restore every location, activity, and display setting to its default? Your uploaded photo will not be deleted.'))return;try{settings=await api('/api/settings/reset',{method:'POST'});baseline=snapshot();renderAll();toast('Defaults restored')}catch(error){toast(error.message,true)}}
+  async function resetAll(){if(!confirm('Restore every location, activity, and display setting to its default? Your uploaded photo will not be deleted.'))return;try{settings=await api('/api/settings/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});baseline=snapshot();renderAll();toast('Defaults restored')}catch(error){toast(error.message,true)}}
   async function uploadPhoto(file){
     if(!file)return;$('#photo-filename').textContent=file.name;const notice=$('#upload-progress');notice.textContent='Preparing and uploading photo…';notice.classList.remove('hidden','error');
     try{settings.photo.enabled=true;await save(false);const body=new FormData();body.append('photo',file);const result=await api('/api/photo',{method:'POST',body});photoAvailable=true;renderPhoto();renderDemo();updateStats();notice.textContent=result.render_configured?(result.render_queued?'Photo uploaded. Its frame render has been queued.':'Photo uploaded. A frame render is already queued.'):'Photo uploaded successfully.';toast(result.render_configured?'Photo uploaded · render queued':'Photo uploaded');if(result.render_configured)pollRender('uploaded-photo')}
@@ -460,7 +458,7 @@ APP_JS = r"""
     catch(error){$('#connection-pill').className='pill offline';$('#connection-pill').innerHTML='<i></i>Offline';$('#fatal').textContent=error.message;$('#fatal').classList.remove('hidden')}
     finally{$('#loading').classList.add('hidden')}
   }
-  acquireToken();$$('.tab').forEach(button=>button.onclick=()=>switchTab(button.dataset.tab));$('#activity-search').oninput=renderActivities;
+  clearLegacyToken();$$('.tab').forEach(button=>button.onclick=()=>switchTab(button.dataset.tab));$('#activity-search').oninput=renderActivities;
   $('#enable-all').onclick=()=>{settings.enabled_activities=catalog.activities.map(a=>a.id);renderActivities();setDirty()};$('#disable-all').onclick=()=>{settings.enabled_activities=[];renderActivities();setDirty()};
   $$('[data-demo-mode]').forEach(button=>button.onclick=()=>startDemo(button.dataset.demoMode));$('#demo-cancel').onclick=cancelDemo;
   $('#save').onclick=()=>save();$('#discard').onclick=()=>{settings=JSON.parse(baseline);renderAll()};$('#reset').onclick=resetAll;$('#refresh').onclick=load;$('#photo-file').onchange=e=>uploadPhoto(e.target.files[0]);$('#render-selected').onclick=renderSelected;$('#render-stars').onclick=renderStarsNow;$('#demo-stars').onclick=()=>demoState&&demoState.active&&demoState.mode==='star-map'?cancelDemo():startDemo('star-map');
@@ -912,7 +910,6 @@ class _ControlHTTPServer(ThreadingHTTPServer):
         callback: Callable[[Path], None] | None,
         render_callback: Callable[[str], bool] | None,
         render_status: Callable[[], dict[str, Any]] | None,
-        access_token: str | None,
         max_connections: int,
         request_timeout: float,
     ):
@@ -928,7 +925,6 @@ class _ControlHTTPServer(ThreadingHTTPServer):
         self.callback = callback
         self.render_callback = render_callback
         self.render_status = render_status
-        self.access_token = access_token
         self.request_timeout = request_timeout
         self._connection_slots = threading.BoundedSemaphore(max_connections)
 
@@ -1007,22 +1003,6 @@ class ControlHandler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, message: str, headers: dict[str, str] | None = None) -> None:
         self._reply(status, _json_bytes({"error": message}), extra_headers=headers)
-
-    def _authorized(self) -> bool:
-        expected = self.server.access_token
-        if expected is None:
-            return True
-        supplied = self.headers.get("X-EInk-Control-Token", "")
-        authorization = self.headers.get("Authorization", "")
-        if authorization.lower().startswith("bearer "):
-            supplied = authorization[7:].strip()
-        return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
-
-    def _require_mutation_auth(self) -> bool:
-        if self._authorized():
-            return True
-        self._error(401, "A valid control-panel access token is required", {"WWW-Authenticate": "Bearer"})
-        return False
 
     def _content_length(self, maximum: int) -> int | None:
         raw = self.headers.get("Content-Length")
@@ -1212,8 +1192,6 @@ class ControlHandler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != "/api/settings":
             self._error(404, "Not found")
             return
-        if not self._require_mutation_auth():
-            return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             self._error(415, "Expected application/json")
@@ -1238,12 +1216,21 @@ class ControlHandler(BaseHTTPRequestHandler):
         if path not in ("/api/photo", "/api/settings/reset", "/api/render", "/api/demo"):
             self._error(404, "Not found")
             return
-        if not self._require_mutation_auth():
-            return
         if path == "/api/settings/reset":
-            length_header = self.headers.get("Content-Length")
-            if length_header not in (None, "0"):
-                self._error(400, "Reset does not accept a request body")
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                self._error(415, "Expected application/json")
+                return
+            length = self._content_length(4096)
+            if length is None:
+                return
+            try:
+                value = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeError):
+                self._error(400, "Request body is not valid JSON")
+                return
+            if value != {}:
+                self._error(422, "Reset request body must be an empty object")
                 return
             self._reply(200, _json_bytes(self.server.store.reset()))
             return
@@ -1378,8 +1365,6 @@ class ControlHandler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != "/api/demo":
             self._error(404, "Not found")
             return
-        if not self._require_mutation_auth():
-            return
         length_header = self.headers.get("Content-Length")
         if length_header not in (None, "0"):
             self._error(400, "Demo cancellation does not accept a request body")
@@ -1409,14 +1394,11 @@ class ControlServer:
         render_status: Callable[[], dict[str, Any]] | None = None,
         bird_cache: BirdWeatherCache | None = None,
         demo_store: DemoOverrideStore | None = None,
-        access_token: str | None = None,
         max_connections: int = 8,
         request_timeout: float = 15.0,
     ):
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
-        if access_token is not None and not access_token:
-            raise ValueError("access_token cannot be empty")
         if max_connections <= 0:
             raise ValueError("max_connections must be positive")
         if request_timeout <= 0:
@@ -1454,7 +1436,6 @@ class ControlServer:
             callback,
             render_callback,
             render_status,
-            access_token,
             max_connections,
             request_timeout,
         )
@@ -1527,11 +1508,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="read repository and photo paths from an eink-display TOML config",
     )
-    token_group = parser.add_mutually_exclusive_group()
-    token_group.add_argument("--access-token", help="require this token for changes")
-    token_group.add_argument(
-        "--access-token-file", type=Path, help="read the mutation token from this file"
-    )
     parser.add_argument(
         "--max-upload-mb", type=int, default=20, help="maximum multipart request size"
     )
@@ -1558,14 +1534,6 @@ def main(argv: list[str] | None = None) -> int:
         weather_repo = weather_repo or runtime_weather
         photo_path = photo_path or runtime_photo
         output_directory = output_directory or runtime_output
-    access_token = args.access_token
-    if args.access_token_file is not None:
-        try:
-            access_token = args.access_token_file.expanduser().read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            parser.error(f"cannot read --access-token-file: {exc}")
-        if not access_token:
-            parser.error("--access-token-file is empty")
     if args.max_upload_mb <= 0:
         parser.error("--max-upload-mb must be positive")
     if args.max_connections <= 0:
@@ -1594,7 +1562,6 @@ def main(argv: list[str] | None = None) -> int:
             max_bytes=args.max_upload_mb * 1024 * 1024,
             render_callback=runtime_renderer.request if runtime_renderer else None,
             render_status=runtime_renderer.status if runtime_renderer else None,
-            access_token=access_token,
             max_connections=args.max_connections,
             request_timeout=args.request_timeout,
         )
@@ -1606,8 +1573,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Uploads: {server.photo_path}")
     if server.output_directory is not None:
         print(f"Frames: {server.output_directory}")
-    if access_token:
-        print("Access token required for changes (token not shown).")
+    print("Changes are open to devices on this LAN; no control token is required.")
     print("Press Ctrl-C to stop.")
     try:
         if server.thread is not None:

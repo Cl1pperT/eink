@@ -201,10 +201,12 @@ python3 -m display_control
 
 The command prints a LAN URL. The Mac may ask for permission to accept incoming
 connections the first time. The default Mac settings file is stored beside the
-simulator's application data. An optional `--access-token` or
-`--access-token-file` protects changes; the Raspberry Pi service uses a token
-file by default. Keep the site on a trusted home LAN and do not expose port
-8765 through router forwarding.
+simulator's application data. No pairing code, login, or control-panel token is
+required: any device on the trusted LAN can use the website and its control API
+to change settings, upload images, start demos, or queue renders. If multiple
+phones edit concurrently, the last valid save wins, so refresh before making
+another change. Keep the site on a trusted home LAN and do not expose port 8765
+through router forwarding.
 
 ## Configuration
 

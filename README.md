@@ -98,13 +98,16 @@ python3 -m display_control
 Open the printed `http://<lan-address>:8765/` URL on a phone connected to the
 same trusted network. The simulator's **Start Phone Control Panel** button runs
 the same service and automatically previews a successful upload. A Raspberry
-Pi installation enables `eink-display-control.service` on port 8765; its
-access code is stored in `/etc/eink-display/control-panel.token`.
+Pi installation enables `eink-display-control.service` on port 8765. No
+pairing code, login, or control-panel token is required.
 
 Selections are a validated, atomic overlay rather than source-code edits. On
 the Pi they persist in `/var/lib/eink-display/control/settings.json`, separate
-from the root-owned runtime configuration. Do not forward port 8765 from your
-router; it is intended for a trusted home LAN.
+from the root-owned runtime configuration. Any device on the trusted LAN can
+view the site and use its control API to change settings, upload images, start
+demos, or queue renders. If multiple phones edit at the same time, the last
+valid save wins, so refresh before making another change. Do not forward port
+8765 from your router; it is intended for a trusted home LAN.
 
 The Overview page and Stars tab also provide a diagnostic **Five-minute demo**
 for Weather, Birds, Stars, or the uploaded Image. It selects the latest
@@ -119,8 +122,8 @@ microphone attached to this frame it intentionally does not describe those
 reports as visitors to the property or claim to provide local recordings.
 
 The desktop simulator generates 1600×1200 landscape or 1200×1600 portrait
-previews. On the Pi, authenticated control actions commit hardware-ready frames
-that the ESP32 picks up on its next poll. See
+previews. On the Pi, control-panel actions commit hardware-ready frames that the
+ESP32 picks up on its next poll. See
 [display_simulator/README.md](display_simulator/README.md) for desktop setup,
 controls, offline mode, integrations, and limitations.
 

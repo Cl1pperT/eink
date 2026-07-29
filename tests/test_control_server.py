@@ -69,7 +69,6 @@ class ControlServerTests(unittest.TestCase):
                     bird_cache=bird_cache,
                     demo_store=self.demo_store,
                     render_callback=lambda mode: self.render_requests.append(mode) or True,
-                    access_token="phone-code",
                 )
             except PermissionError:
                 self.temporary.cleanup()
@@ -104,6 +103,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(b"Five-minute demo", body)
         self.assertEqual(body.count(b"data-demo-mode="), 4)
         self.assertIn(b"Press the physical button", body)
+        self.assertNotIn(b"X-EInk-Control-Token", body)
+        self.assertNotIn(b"localStorage.setItem", body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         status, _headers, body = self.request("GET", "/api/catalog")
         self.assertEqual(status, 200)
@@ -264,15 +265,10 @@ class ControlServerTests(unittest.TestCase):
         (mode / "current.json").write_text(json.dumps(manifest), encoding="utf-8")
         self.assertEqual(self.request("GET", "/api/stars/preview")[0], 404)
 
-    def test_mutations_require_token_and_invalid_state_is_not_saved(self):
+    def test_public_settings_mutation_validates_before_saving(self):
         settings = default_settings(self.catalog)
         encoded = json.dumps(settings).encode()
         headers = {"Content-Type": "application/json", "Content-Length": str(len(encoded))}
-        status, _response_headers, _body = self.request("PUT", "/api/settings", encoded, headers)
-        self.assertEqual(status, 401)
-        self.assertFalse(self.server.settings_path.exists())
-
-        headers["X-EInk-Control-Token"] = "phone-code"
         status, _response_headers, body = self.request("PUT", "/api/settings", encoded, headers)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), settings)
@@ -286,7 +282,35 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("at least one", json.loads(body)["error"])
         self.assertEqual(self.server.settings_path.read_bytes(), before)
 
-    def test_five_minute_demo_is_authenticated_isolated_and_expires(self):
+    def test_public_reset_requires_an_empty_json_object(self):
+        settings = default_settings(self.catalog)
+        settings["recommendation_count"] = 1
+        self.server.httpd.store.save(settings)
+
+        self.assertEqual(self.request("POST", "/api/settings/reset")[0], 415)
+
+        invalid = b'{"unexpected":true}'
+        invalid_headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(invalid)),
+        }
+        self.assertEqual(
+            self.request("POST", "/api/settings/reset", invalid, invalid_headers)[0],
+            422,
+        )
+
+        body = b"{}"
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        }
+        status, _response_headers, payload = self.request(
+            "POST", "/api/settings/reset", body, headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload), default_settings(self.catalog))
+
+    def test_public_five_minute_demo_is_isolated_and_expires(self):
         initial_status, _headers, initial_body = self.request("GET", "/api/demo")
         self.assertEqual(initial_status, 200)
         self.assertFalse(json.loads(initial_body)["active"])
@@ -298,10 +322,6 @@ class ControlServerTests(unittest.TestCase):
             "Content-Type": "application/json",
             "Content-Length": str(len(body)),
         }
-        self.assertEqual(self.request("POST", "/api/demo", body, headers)[0], 401)
-        self.assertFalse(self.demo_store.path.exists())
-
-        headers["X-EInk-Control-Token"] = "phone-code"
         for invalid in (
             {"mode": "automatic"},
             {"mode": "test-pattern"},
@@ -357,12 +377,9 @@ class ControlServerTests(unittest.TestCase):
             self.request("POST", "/api/demo", weather, weather_headers)[0],
             200,
         )
-        self.assertEqual(self.request("DELETE", "/api/demo")[0], 401)
-        self.assertTrue(self.demo_store.path.exists())
         status, _response_headers, payload = self.request(
             "DELETE",
             "/api/demo",
-            headers={"X-EInk-Control-Token": "phone-code"},
         )
         self.assertEqual(status, 200)
         self.assertFalse(json.loads(payload)["active"])
@@ -375,7 +392,7 @@ class ControlServerTests(unittest.TestCase):
             409,
         )
 
-    def test_authenticated_photo_upload_is_normalized_and_visible(self):
+    def test_public_photo_upload_is_normalized_and_visible(self):
         source = io.BytesIO()
         Image.new("RGBA", (17, 9), (20, 40, 60, 100)).save(source, format="PNG")
         boundary = "control-panel-test-boundary"
@@ -386,7 +403,6 @@ class ControlServerTests(unittest.TestCase):
         headers = {
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Content-Length": str(len(body)),
-            "X-EInk-Control-Token": "phone-code",
         }
         status, _response_headers, response_body = self.request(
             "POST", "/api/photo", body, headers
@@ -405,11 +421,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertEqual(payload, self.server.photo_path.read_bytes())
 
-    def test_explicit_render_action_is_authenticated_and_concrete(self):
+    def test_public_explicit_render_action_is_concrete(self):
         body = json.dumps({"mode": "birds"}).encode()
         headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
-        self.assertEqual(self.request("POST", "/api/render", body, headers)[0], 401)
-        headers["X-EInk-Control-Token"] = "phone-code"
         status, _headers, payload = self.request("POST", "/api/render", body, headers)
         self.assertEqual(status, 202)
         self.assertTrue(json.loads(payload)["queued"])
