@@ -49,6 +49,13 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
                 "subtitle": "Nearby Fortnight",
             }
             value["stars"] = {"direction": "west"}
+            value["photo"]["caption"] = "Summer trail"
+            value["photo"]["rotation"] = 90
+            value["photo"]["crop"] = {
+                "center_x": 0.2,
+                "center_y": 0.8,
+                "zoom": 2.5,
+            }
             value["activity_overrides"] = {
                 "hammocking": {"estimated_great_days": 25}
             }
@@ -72,6 +79,12 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(context.options["bird_title"], "Avian Visitors")
             self.assertEqual(context.options["bird_subtitle"], "Nearby Fortnight")
             self.assertEqual(context.options["direction"], 270)
+            self.assertEqual(context.options["caption"], "Summer trail")
+            self.assertEqual(context.options["rotation"], 90)
+            self.assertEqual(
+                context.options["photo_crop"],
+                {"center_x": 0.2, "center_y": 0.8, "zoom": 2.5},
+            )
             self.assertEqual(
                 context.options["activity_overrides"]["hammocking"]["estimated_great_days"],
                 25,

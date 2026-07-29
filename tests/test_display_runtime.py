@@ -412,11 +412,78 @@ class FrameRuntimeTests(unittest.TestCase):
             }
             with patch.object(ImagePipeline, "render", new=capture_settings):
                 runtime = FrameRuntime(config, source_factories=factories)
-                runtime.render("uploaded-photo")
+                photo_artifact = runtime.render("uploaded-photo")
                 runtime.render("test-pattern")
 
             self.assertIs(seen["Uploaded Photo · test"], config.photo_conversion)
             self.assertIs(seen["Test Pattern · test"], config.conversion)
+            manifest = json.loads(
+                photo_artifact.manifest_path.read_text(encoding="utf-8")
+            )
+            self.assertRegex(manifest["photo"]["recipe_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                manifest["photo"]["crop"],
+                {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+            )
+
+    def test_photo_recipe_commit_advances_when_palette_pixels_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            photo = root / "photo.png"
+            Image.new("RGB", (40, 30), (30, 140, 210)).save(photo)
+            runtime = FrameRuntime(
+                config_for(root, photo_path=photo),
+                source_factories={
+                    "uploaded-photo": lambda: SolidSource(
+                        (30, 140, 210),
+                        "Uploaded Photo · test",
+                    )
+                },
+            )
+            controls = (
+                {
+                    "photo_enabled": True,
+                    "photo_crop": {
+                        "center_x": 0.5,
+                        "center_y": 0.5,
+                        "zoom": 1.0,
+                    },
+                },
+                {
+                    "photo_enabled": True,
+                    "photo_crop": {
+                        "center_x": 0.25,
+                        "center_y": 0.75,
+                        "zoom": 2.0,
+                    },
+                },
+            )
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                side_effect=controls,
+            ):
+                first = runtime.render("uploaded-photo")
+                first_manifest = json.loads(
+                    first.manifest_path.read_text(encoding="utf-8")
+                )
+                second = runtime.render("uploaded-photo")
+
+            second_manifest = json.loads(
+                second.manifest_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(first.wire_checksum, second.wire_checksum)
+            self.assertTrue(second.changed)
+            self.assertTrue(second.written)
+            self.assertNotEqual(
+                first_manifest["photo"]["recipe_sha256"],
+                second_manifest["photo"]["recipe_sha256"],
+            )
+            self.assertEqual(
+                second_manifest["photo"]["crop"],
+                {"center_x": 0.25, "center_y": 0.75, "zoom": 2.0},
+            )
 
     def test_portrait_commit_is_native_size(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -638,6 +705,41 @@ class FrameRuntimeTests(unittest.TestCase):
                 return_value={"display_mode": "automatic"},
             ):
                 self.assertEqual(runtime.resolve_active_mode(morning), "weather")
+
+    def test_timed_photo_owns_next_wake_until_its_exact_expiry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings_path = root / "control.json"
+            config = config_for(root, control_settings_path=settings_path)
+            runtime = FrameRuntime(config)
+            start = datetime.fromisoformat("2026-07-11T14:50:00+00:00")
+            duration = 2 * 60 * 60
+            store = DemoOverrideStore(settings_path, clock=lambda: start)
+            store.activate("uploaded-photo", duration_seconds=duration)
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"display_mode": "automatic"},
+            ):
+                state = runtime.resolve_active_state(start)
+                self.assertEqual(state.mode, "uploaded-photo")
+                self.assertEqual(
+                    state.next_wake_at,
+                    start + timedelta(seconds=duration),
+                )
+                self.assertEqual(
+                    runtime.resolve_active_mode(
+                        start + timedelta(seconds=duration - 1)
+                    ),
+                    "uploaded-photo",
+                )
+                self.assertEqual(
+                    runtime.resolve_active_mode(
+                        start + timedelta(seconds=duration)
+                    ),
+                    "birds",
+                )
 
 
 if __name__ == "__main__":

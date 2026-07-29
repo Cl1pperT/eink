@@ -15,6 +15,11 @@ from display_simulator.models import Orientation, RenderContext
 from display_simulator.models import ConversionSettings
 from display_simulator.pipeline import SPECTRA_PALETTE, convert_to_spectra
 from display_simulator.sources import BirdsSource, StarMapSource, TestPatternSource, WeatherSource
+from display_simulator.sources.uploaded_photo import (
+    UploadedPhotoSource,
+    photo_crop_box,
+    photo_recipe_digest,
+)
 from display_simulator.sources.starmap import (
     _INK_BLACK,
     _INK_BLUE,
@@ -93,6 +98,95 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(image.mode, "RGB")
         self.assertEqual(image.size, (1600, 1200))
         self.assertGreater(len(image.getcolors(maxcolors=10_000_000)), 20)
+
+    def test_uploaded_photo_crop_pan_and_zoom_match_the_panel_aspect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wide.png"
+            source = Image.new("RGB", (800, 400), "red")
+            source.paste("blue", (400, 0, 800, 400))
+            source.save(path)
+
+            left = UploadedPhotoSource().render(
+                RenderContext(
+                    Orientation.LANDSCAPE,
+                    datetime(2026, 7, 10, 8),
+                    options={
+                        "photo_path": str(path),
+                        "photo_crop": {
+                            "center_x": 0.0,
+                            "center_y": 0.5,
+                            "zoom": 1.0,
+                        },
+                    },
+                )
+            )
+            right = UploadedPhotoSource().render(
+                RenderContext(
+                    Orientation.LANDSCAPE,
+                    datetime(2026, 7, 10, 8),
+                    options={
+                        "photo_path": str(path),
+                        "photo_crop": {
+                            "center_x": 1.0,
+                            "center_y": 0.5,
+                            "zoom": 1.0,
+                        },
+                    },
+                )
+            )
+            zoomed_box = photo_crop_box(
+                (800, 400),
+                (1600, 1200),
+                {"center_x": 0.5, "center_y": 0.5, "zoom": 2.0},
+            )
+
+            self.assertEqual(left.size, (1600, 1200))
+            self.assertEqual(right.size, (1600, 1200))
+            self.assertEqual(left.getpixel((800, 600)), (255, 0, 0))
+            self.assertEqual(right.getpixel((800, 600)), (0, 0, 255))
+            self.assertLess(zoomed_box[2] - zoomed_box[0], 533)
+            self.assertLess(zoomed_box[3] - zoomed_box[1], 400)
+
+    def test_photo_recipe_tracks_source_rotation_caption_and_crop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "photo.png"
+            Image.new("RGB", (40, 30), (20, 40, 60)).save(path)
+            baseline = photo_recipe_digest(
+                path,
+                0,
+                "",
+                {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+            )
+            self.assertEqual(
+                baseline,
+                photo_recipe_digest(
+                    path,
+                    0,
+                    "",
+                    {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+                ),
+            )
+            variants = (
+                photo_recipe_digest(
+                    path,
+                    90,
+                    "",
+                    {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+                ),
+                photo_recipe_digest(
+                    path,
+                    0,
+                    "Caption",
+                    {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+                ),
+                photo_recipe_digest(
+                    path,
+                    0,
+                    "",
+                    {"center_x": 0.25, "center_y": 0.5, "zoom": 2.0},
+                ),
+            )
+            self.assertTrue(all(value != baseline for value in variants))
 
     def test_demo_species_exercise_rarity_weighted_score(self):
         by_name = {item["com"]: item for item in DEMO_SPECIES}

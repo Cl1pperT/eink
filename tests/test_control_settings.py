@@ -57,9 +57,13 @@ class ControlSettingsTests(unittest.TestCase):
             settings = default_settings(catalog)
             self.assertEqual(settings["enabled_locations"], list(catalog.location_ids))
             self.assertEqual(settings["enabled_activities"], list(catalog.activity_ids))
-            self.assertEqual(settings["schema_version"], 3)
+            self.assertEqual(settings["schema_version"], 4)
             self.assertEqual(settings["display"]["mode"], "automatic")
             self.assertEqual(settings["stars"], {"direction": "south"})
+            self.assertEqual(
+                settings["photo"]["crop"],
+                {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+            )
             self.assertEqual(
                 settings["birds"],
                 {
@@ -84,11 +88,15 @@ class ControlSettingsTests(unittest.TestCase):
             legacy.pop("stars")
             legacy["enabled_locations"] = ["provo_utah"]
             migrated = validate_settings(legacy, catalog)
-            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["schema_version"], 4)
             self.assertEqual(migrated["enabled_locations"], ["mount_timpanogos"])
             self.assertEqual(migrated["display"]["mode"], "automatic")
             self.assertEqual(migrated["birds"]["postal_code"], "84601")
             self.assertEqual(migrated["stars"]["direction"], "south")
+            self.assertEqual(
+                migrated["photo"]["crop"],
+                {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+            )
 
     def test_v2_settings_gain_default_star_direction(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,8 +105,21 @@ class ControlSettingsTests(unittest.TestCase):
             legacy["schema_version"] = 2
             legacy.pop("stars")
             migrated = validate_settings(legacy, catalog)
-            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["schema_version"], 4)
             self.assertEqual(migrated["stars"], {"direction": "south"})
+
+    def test_v3_settings_gain_default_photo_crop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = sample_catalog(Path(directory))
+            legacy = default_settings(catalog)
+            legacy["schema_version"] = 3
+            legacy["photo"].pop("crop")
+            migrated = validate_settings(legacy, catalog)
+            self.assertEqual(migrated["schema_version"], 4)
+            self.assertEqual(
+                migrated["photo"]["crop"],
+                {"center_x": 0.5, "center_y": 0.5, "zoom": 1.0},
+            )
 
     def test_cardinal_star_directions_are_valid(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -163,6 +184,36 @@ class ControlSettingsTests(unittest.TestCase):
                     value.update(change)
                     with self.assertRaisesRegex(SettingsValidationError, message):
                         validate_settings(value, catalog)
+
+    def test_photo_crop_is_normalized_and_strictly_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = sample_catalog(Path(directory))
+            value = default_settings(catalog)
+            value["photo"]["crop"] = {
+                "center_x": 0.125,
+                "center_y": 0.875,
+                "zoom": 3,
+            }
+            self.assertEqual(
+                validate_settings(value, catalog)["photo"]["crop"],
+                {"center_x": 0.125, "center_y": 0.875, "zoom": 3.0},
+            )
+
+            cases = (
+                ("center_x", -0.01, "center_x"),
+                ("center_y", 1.01, "center_y"),
+                ("zoom", 0.99, "zoom"),
+                ("zoom", 8.01, "zoom"),
+                ("center_x", float("nan"), "finite"),
+                ("center_y", float("inf"), "finite"),
+                ("zoom", True, "number"),
+            )
+            for field, invalid, message in cases:
+                with self.subTest(field=field, invalid=invalid):
+                    candidate = default_settings(catalog)
+                    candidate["photo"]["crop"][field] = invalid
+                    with self.assertRaisesRegex(SettingsValidationError, message):
+                        validate_settings(candidate, catalog)
 
     def test_sparse_overrides_round_trip_atomically(self):
         with tempfile.TemporaryDirectory() as directory:

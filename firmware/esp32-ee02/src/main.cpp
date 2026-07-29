@@ -14,6 +14,7 @@
 #include <ctime>
 
 #include "battery_monitor.h"
+#include "button_gesture.h"
 #include "device_config.h"
 #include "frame_contract.h"
 #include "wake_schedule.h"
@@ -81,6 +82,7 @@ constexpr gpio_num_t kButton3 = GPIO_NUM_5;
 constexpr char kButton1FrameMode[] = "weather";
 constexpr char kButton2FrameMode[] = "birds";
 constexpr char kButton3FrameMode[] = "star-map";
+constexpr char kButtonChordFrameMode[] = "active";
 constexpr uint8_t kBatteryAdcPin = EINK_BATTERY_ADC_PIN;
 constexpr uint8_t kBatteryEnablePin = EINK_BATTERY_ENABLE_PIN;
 constexpr uint64_t kButtonWakeMask =
@@ -115,7 +117,8 @@ uint32_t clockAttemptedLocalDay = 0;
 bool wifiAttemptedThisWake = false;
 RTC_DATA_ATTR uint16_t ntpRetryWakesRemaining = 0;
 eink::WakeDeadline scheduledWake;
-volatile uint8_t pendingButtonNumber = 0;
+eink::ButtonGestureLatch pendingButtonGesture;
+portMUX_TYPE buttonGestureMux = portMUX_INITIALIZER_UNLOCKED;
 
 enum class SyncResult {
   kUpdated,
@@ -1075,74 +1078,124 @@ SyncResult syncFrame(const String &requestedMode) {
   return SyncResult::kUpdated;
 }
 
-bool anyButtonIsPressed() {
-  return digitalRead(kButton1) == LOW || digitalRead(kButton2) == LOW ||
-         digitalRead(kButton3) == LOW;
+uint8_t pressedButtonMask() {
+  uint8_t mask = 0;
+  if (digitalRead(kButton1) == LOW) {
+    mask |= eink::kWeatherButtonMask;
+  }
+  if (digitalRead(kButton2) == LOW) {
+    mask |= eink::kBirdsButtonMask;
+  }
+  if (digitalRead(kButton3) == LOW) {
+    mask |= eink::kStarsButtonMask;
+  }
+  return mask;
 }
 
-const char *frameModeForButtonNumber(uint8_t buttonNumber) {
-  if (buttonNumber == 1) {
-    return kButton1FrameMode;
+bool anyButtonIsPressed() {
+  return pressedButtonMask() != 0;
+}
+
+uint8_t buttonGestureMaskForWakeStatus(uint64_t wakeStatus) {
+  uint8_t mask = 0;
+  if ((wakeStatus & (1ULL << kButton1)) != 0) {
+    mask |= eink::kWeatherButtonMask;
   }
-  if (buttonNumber == 2) {
-    return kButton2FrameMode;
+  if ((wakeStatus & (1ULL << kButton2)) != 0) {
+    mask |= eink::kBirdsButtonMask;
   }
-  if (buttonNumber == 3) {
-    return kButton3FrameMode;
+  if ((wakeStatus & (1ULL << kButton3)) != 0) {
+    mask |= eink::kStarsButtonMask;
+  }
+  return mask;
+}
+
+const char *frameModeForButtonGesture(uint8_t gestureMask) {
+  switch (eink::buttonGestureAction(gestureMask)) {
+    case eink::ButtonGestureAction::kWeather:
+      return kButton1FrameMode;
+    case eink::ButtonGestureAction::kBirds:
+      return kButton2FrameMode;
+    case eink::ButtonGestureAction::kStars:
+      return kButton3FrameMode;
+    case eink::ButtonGestureAction::kImageCheck:
+      // The virtual active channel lets the Pi decide whether a timed upload
+      // is still eligible. It cannot resurrect an expired concrete photo.
+      return kButtonChordFrameMode;
+    case eink::ButtonGestureAction::kNone:
+      return nullptr;
   }
   return nullptr;
 }
 
-uint8_t buttonNumberForWakeStatus(uint64_t wakeStatus) {
-  // Give the numbered buttons deterministic priority if more than one is
-  // pressed at the same time. EXT1 retains this mask across deep sleep, so the
-  // selection remains reliable even when the user releases the button before
-  // setup reaches this function.
-  if ((wakeStatus & (1ULL << kButton1)) != 0) {
-    return 1;
-  }
-  if ((wakeStatus & (1ULL << kButton2)) != 0) {
-    return 2;
-  }
-  if ((wakeStatus & (1ULL << kButton3)) != 0) {
-    return 3;
-  }
-  return 0;
+void latchPendingButtonGesture(uint8_t observedMask) {
+  const uint32_t nowMilliseconds = millis();
+  portENTER_CRITICAL(&buttonGestureMux);
+  eink::latchButtonGesture(
+      pendingButtonGesture, observedMask, nowMilliseconds);
+  portEXIT_CRITICAL(&buttonGestureMux);
 }
 
-const char *frameModeForButtonWake(uint64_t wakeStatus) {
-  return frameModeForButtonNumber(buttonNumberForWakeStatus(wakeStatus));
-}
-
-void discardWakeButtonLatch(uint8_t wakeButtonNumber) {
-  if (wakeButtonNumber == 0) {
-    return;
-  }
-  noInterrupts();
-  if (pendingButtonNumber == wakeButtonNumber) {
-    pendingButtonNumber = 0;
-  }
-  interrupts();
+void IRAM_ATTR latchPendingButtonGestureFromIsr(uint8_t observedMask) {
+  const uint32_t nowMilliseconds = millis();
+  portENTER_CRITICAL_ISR(&buttonGestureMux);
+  eink::latchButtonGesture(
+      pendingButtonGesture, observedMask, nowMilliseconds);
+  portEXIT_CRITICAL_ISR(&buttonGestureMux);
 }
 
 void IRAM_ATTR onButton1Pressed() {
-  pendingButtonNumber = 1;
+  latchPendingButtonGestureFromIsr(eink::kWeatherButtonMask);
 }
 
 void IRAM_ATTR onButton2Pressed() {
-  pendingButtonNumber = 2;
+  latchPendingButtonGestureFromIsr(eink::kBirdsButtonMask);
 }
 
 void IRAM_ATTR onButton3Pressed() {
-  pendingButtonNumber = 3;
+  latchPendingButtonGestureFromIsr(eink::kStarsButtonMask);
 }
 
-uint8_t takePendingButton() {
-  noInterrupts();
-  const uint8_t buttonNumber = pendingButtonNumber;
-  pendingButtonNumber = 0;
-  interrupts();
-  return buttonNumber;
+bool hasPendingButtonGesture() {
+  portENTER_CRITICAL(&buttonGestureMux);
+  const bool pending = pendingButtonGesture.mask != 0;
+  portEXIT_CRITICAL(&buttonGestureMux);
+  return pending;
+}
+
+uint8_t takePendingButtonGesture() {
+  const uint32_t nowMilliseconds = millis();
+  portENTER_CRITICAL(&buttonGestureMux);
+  const uint8_t mask = eink::takeReadyButtonGesture(
+      pendingButtonGesture, nowMilliseconds);
+  portEXIT_CRITICAL(&buttonGestureMux);
+  return mask;
+}
+
+void discardPendingButtonGesture(uint8_t consumedMask) {
+  if (consumedMask == 0) {
+    return;
+  }
+  const uint32_t nowMilliseconds = millis();
+  portENTER_CRITICAL(&buttonGestureMux);
+  eink::discardButtonGestureMask(
+      pendingButtonGesture, consumedMask, nowMilliseconds);
+  portEXIT_CRITICAL(&buttonGestureMux);
+}
+
+uint8_t waitAndTakePendingButtonGesture() {
+  while (true) {
+    while (anyButtonIsPressed()) {
+      delay(10);
+    }
+    const uint8_t mask = takePendingButtonGesture();
+    if (mask != 0 || !hasPendingButtonGesture()) {
+      return mask;
+    }
+    // A quick single tap is retained while its short chord window remains
+    // open, giving a second distinct button time to join the gesture.
+    delay(10);
+  }
 }
 
 void attachButtonInterrupts() {
@@ -1160,20 +1213,30 @@ uint64_t nextTimerWakeSeconds() {
       scheduledWake, millis(), EINK_CHECK_INTERVAL_SECONDS);
 }
 
+bool serviceButtonGesture(uint8_t gestureMask, const char *timing) {
+  const char *mode = frameModeForButtonGesture(gestureMask);
+  if (mode == nullptr) {
+    return false;
+  }
+  if (eink::isButtonChord(gestureMask)) {
+    Serial.printf(
+        "Two-button image check %s; requesting updated active manifest\n",
+        timing);
+  } else {
+    Serial.printf(
+        "Button gesture 0x%02x %s; requesting %s manifest\n",
+        static_cast<unsigned>(gestureMask), timing, mode);
+  }
+  sampleBatteryEveryWake();
+  wifiAttemptedThisWake = false;
+  syncFrame(mode);
+  return true;
+}
+
 void sleepUntilButton() {
   while (true) {
-    while (anyButtonIsPressed()) {
-      delay(10);
-    }
-    const uint8_t pending = takePendingButton();
-    const char *pendingMode = frameModeForButtonNumber(pending);
-    if (pendingMode != nullptr) {
-      Serial.printf(
-          "Button %u was pressed while awake; requesting %s manifest\n",
-          static_cast<unsigned>(pending), pendingMode);
-      sampleBatteryEveryWake();
-      wifiAttemptedThisWake = false;
-      syncFrame(pendingMode);
+    const uint8_t pending = waitAndTakePendingButtonGesture();
+    if (serviceButtonGesture(pending, "while awake")) {
       continue;
     }
 
@@ -1194,18 +1257,8 @@ void sleepUntilButton() {
     // Check once more after radio shutdown and serial flushing. A press held
     // here is released before servicing so it cannot immediately retrigger
     // EXT1; a short released press remains latched by the ISR.
-    while (anyButtonIsPressed()) {
-      delay(10);
-    }
-    const uint8_t finalPending = takePendingButton();
-    const char *finalMode = frameModeForButtonNumber(finalPending);
-    if (finalMode != nullptr) {
-      Serial.printf(
-          "Button %u was pressed before sleep; requesting %s manifest\n",
-          static_cast<unsigned>(finalPending), finalMode);
-      sampleBatteryEveryWake();
-      wifiAttemptedThisWake = false;
-      syncFrame(finalMode);
+    const uint8_t finalPending = waitAndTakePendingButtonGesture();
+    if (serviceButtonGesture(finalPending, "before sleep")) {
       continue;
     }
 
@@ -1219,28 +1272,44 @@ void sleepUntilButton() {
 
 void setup() {
   Serial.begin(115200);
+  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  const uint64_t wakeStatus =
+      wakeCause == ESP_SLEEP_WAKEUP_EXT1
+          ? esp_sleep_get_ext1_wakeup_status() & kButtonWakeMask
+          : 0;
   pinMode(kButton1, INPUT_PULLUP);
   pinMode(kButton2, INPUT_PULLUP);
   pinMode(kButton3, INPUT_PULLUP);
   pinMode(kBatteryEnablePin, OUTPUT);
   digitalWrite(kBatteryEnablePin, LOW);
   attachButtonInterrupts();
+  if (wakeCause == ESP_SLEEP_WAKEUP_EXT1) {
+    // EXT1 can wake on the first low pin before the user's second finger has
+    // settled. Seed the retained wake bits immediately, merge any buttons
+    // still held now, and let subsequent ISR edges share the same 350 ms
+    // gesture window.
+    latchPendingButtonGesture(
+        buttonGestureMaskForWakeStatus(wakeStatus) | pressedButtonMask());
+  }
   setenv("TZ", EINK_TIMEZONE, 1);
   tzset();
   delay(750);
   Serial.println("EE02 scheduled image and per-wake battery updater starting");
-  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   const char *requestedFrameMode = EINK_FRAME_MODE;
-  uint8_t wakeButtonNumber = 0;
+  uint8_t wakeGestureMask = 0;
   if (wakeCause == ESP_SLEEP_WAKEUP_EXT1) {
-    const uint64_t wakeStatus =
-        esp_sleep_get_ext1_wakeup_status() & kButtonWakeMask;
-    wakeButtonNumber = buttonNumberForWakeStatus(wakeStatus);
-    const char *buttonFrameMode = frameModeForButtonWake(wakeStatus);
+    wakeGestureMask = waitAndTakePendingButtonGesture();
+    const char *buttonFrameMode =
+        frameModeForButtonGesture(wakeGestureMask);
     if (buttonFrameMode != nullptr) {
       requestedFrameMode = buttonFrameMode;
-      Serial.printf("Wake reason: user button; requesting %s\n",
-                    requestedFrameMode);
+      if (eink::isButtonChord(wakeGestureMask)) {
+        Serial.println(
+            "Wake reason: two-button image check; requesting active");
+      } else {
+        Serial.printf("Wake reason: user button; requesting %s\n",
+                      requestedFrameMode);
+      }
     } else {
       Serial.println(
           "Wake reason: user button without a valid pin; requesting active");
@@ -1285,7 +1354,7 @@ void setup() {
   // The falling-edge ISR may see contact bounce from the same press that EXT1
   // already consumed. Remove that one duplicate after release while preserving
   // a different button pressed during boot.
-  discardWakeButtonLatch(wakeButtonNumber);
+  discardPendingButtonGesture(wakeGestureMask);
 
   struct tm localClock {};
   synchronizeClockIfDue(localClock);

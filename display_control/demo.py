@@ -1,8 +1,8 @@
-"""Short-lived display overrides for the diagnostic control panel.
+"""Temporary display overrides for the diagnostic control panel.
 
 The override deliberately lives beside, rather than inside, the persistent
 settings document.  A stale browser saving ordinary settings therefore cannot
-extend, delete, or resurrect another phone's five-minute demo.
+extend, delete, or resurrect another phone's five-minute demo or timed photo.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from typing import Any, Callable, Mapping
 
 DEMO_SCHEMA_VERSION = 1
 DEMO_DURATION_SECONDS = 5 * 60
+PHOTO_MIN_DURATION_SECONDS = 30 * 60
+PHOTO_MAX_DURATION_SECONDS = 24 * 60 * 60
 DEMO_MODES = frozenset(("weather", "birds", "star-map", "uploaded-photo"))
 MAX_DEMO_STATE_BYTES = 4096
 _DEMO_FIELDS = frozenset(("schema_version", "mode", "started_at", "expires_at"))
@@ -56,6 +58,37 @@ def _parse_timestamp(value: Any, label: str) -> datetime:
     return _aware_utc(parsed)
 
 
+def _validate_duration_seconds(mode: str, value: Any) -> int:
+    if type(value) is not int:
+        raise DemoOverrideError(
+            "duration_seconds must be a whole number of seconds"
+        )
+    if mode != "uploaded-photo":
+        if value != DEMO_DURATION_SECONDS:
+            raise DemoOverrideError("non-photo demos must last exactly five minutes")
+        return value
+    if value == DEMO_DURATION_SECONDS:
+        return value
+    if not PHOTO_MIN_DURATION_SECONDS <= value <= PHOTO_MAX_DURATION_SECONDS:
+        raise DemoOverrideError(
+            "uploaded-photo duration_seconds must be five minutes or from "
+            f"{PHOTO_MIN_DURATION_SECONDS} to {PHOTO_MAX_DURATION_SECONDS}"
+        )
+    return value
+
+
+def _document_duration_seconds(
+    mode: str,
+    started_at: datetime,
+    expires_at: datetime,
+) -> int:
+    duration = expires_at - started_at
+    total_seconds = duration.total_seconds()
+    if not total_seconds.is_integer():
+        raise DemoOverrideError("demo override duration must use whole seconds")
+    return _validate_duration_seconds(mode, int(total_seconds))
+
+
 def _load_document(path: Path) -> dict[str, Any]:
     try:
         stat = path.lstat()
@@ -80,12 +113,12 @@ def _load_document(path: Path) -> dict[str, Any]:
         raise DemoOverrideError("demo override mode is unsupported")
     started_at = _parse_timestamp(value["started_at"], "started_at")
     expires_at = _parse_timestamp(value["expires_at"], "expires_at")
-    if expires_at - started_at != timedelta(seconds=DEMO_DURATION_SECONDS):
-        raise DemoOverrideError("demo override must last exactly five minutes")
+    duration_seconds = _document_duration_seconds(mode, started_at, expires_at)
     return {
         "mode": mode,
         "started_at": started_at,
         "expires_at": expires_at,
+        "duration_seconds": duration_seconds,
     }
 
 
@@ -106,6 +139,7 @@ def read_demo_override(
         "mode": value["mode"],
         "started_at": _timestamp(value["started_at"]),
         "expires_at": _timestamp(value["expires_at"]),
+        "duration_seconds": value["duration_seconds"],
         "remaining_seconds": max(
             1,
             math.ceil((value["expires_at"] - current).total_seconds()),
@@ -149,17 +183,23 @@ class DemoOverrideStore:
             return {
                 "active": True,
                 **value,
-                "duration_seconds": DEMO_DURATION_SECONDS,
             }
 
-    def activate(self, mode: str, *, now: datetime | None = None) -> dict[str, Any]:
+    def activate(
+        self,
+        mode: str,
+        duration_seconds: int = DEMO_DURATION_SECONDS,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         if mode not in DEMO_MODES:
             raise DemoOverrideError(
                 "mode must be weather, birds, star-map, or uploaded-photo"
             )
+        duration_seconds = _validate_duration_seconds(mode, duration_seconds)
         with self._lock:
             started_at = _aware_utc(now or self._clock())
-            expires_at = started_at + timedelta(seconds=DEMO_DURATION_SECONDS)
+            expires_at = started_at + timedelta(seconds=duration_seconds)
             document = {
                 "schema_version": DEMO_SCHEMA_VERSION,
                 "mode": mode,

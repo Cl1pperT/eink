@@ -16,6 +16,7 @@ from PIL import Image, ImageCms
 from display_control.demo import DemoOverrideStore
 from display_control.server import AsyncRuntimeRenderer, ControlServer, _runtime_config_values
 from display_control.settings import default_settings
+from display_simulator.sources.uploaded_photo import photo_recipe_digest
 from tests.test_control_settings import sample_catalog
 
 
@@ -90,6 +91,40 @@ class ControlServerTests(unittest.TestCase):
         connection.close()
         return result
 
+    def commit_photo_preview(self, recipe_sha256: str) -> None:
+        mode = self.root / "frames" / "uploaded-photo"
+        pixel_identity = "e" * 64
+        preview = mode / "frames" / f"{pixel_identity}.rgb.png"
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1600, 1200), (235, 230, 215)).save(preview)
+        payload = preview.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        (mode / "current.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "format": "eink-frame-artifacts-v2",
+                    "mode": "uploaded-photo",
+                    "generated_at": "2026-07-27T12:00:00+00:00",
+                    "rendered_for": "2026-07-27T11:55:00+00:00",
+                    "dimensions": {"width": 1600, "height": 1200},
+                    "pixel_checksum": {
+                        "algorithm": "sha256-dimensions-rgb-v1",
+                        "value": pixel_identity,
+                    },
+                    "photo": {"recipe_sha256": recipe_sha256},
+                    "files": {
+                        "rgb_png": {
+                            "path": f"frames/{pixel_identity}.rgb.png",
+                            "bytes": len(payload),
+                            "sha256": digest,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_mobile_page_catalog_and_security_headers(self):
         status, headers, body = self.request("GET", "/")
         self.assertEqual(status, 200)
@@ -102,10 +137,27 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(b'id="display-mode"', body)
         self.assertIn(b"Five-minute demo", body)
         self.assertEqual(body.count(b"data-demo-mode="), 4)
-        self.assertIn(b"Press the physical button", body)
+        self.assertIn(b"physical mode button", body)
+        self.assertIn(b"hold any two buttons for Image", body)
         self.assertIn(b"whole visible sky", body)
         self.assertIn(b"90 minutes after local sunset", body)
-        self.assertIn(b"Date.now()<=sunriseTime", body)
+        self.assertIn(b'id="photo-crop-canvas"', body)
+        self.assertIn(b'id="photo-zoom"', body)
+        self.assertIn(b'id="photo-duration"', body)
+        self.assertIn(b'min="30" max="1440"', body)
+        self.assertIn(b'id="prepare-photo-display"', body)
+        self.assertIn(b"hold any two frame buttons", body)
+        self.assertIn(b"touch-action:none", self.request("GET", "/app.css")[2])
+        app_js = self.request("GET", "/app.js")[2]
+        self.assertIn(b"Date.now()<=sunriseTime", app_js)
+        self.assertIn(b"startPhotoDrag", app_js)
+        self.assertIn(b"waitForRenderCompletion", app_js)
+        self.assertIn(b"/api/photo/display", app_js)
+        self.assertIn(b"Image demo active \xc2\xb7 hold any two frame buttons", app_js)
+        self.assertLess(
+            app_js.index(b"waitForRenderCompletion('uploaded-photo')"),
+            app_js.index(b"api('/api/photo/display"),
+        )
         self.assertNotIn(b"X-EInk-Control-Token", body)
         self.assertNotIn(b"localStorage.setItem", body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
@@ -402,6 +454,110 @@ class ControlServerTests(unittest.TestCase):
             self.request("POST", "/api/demo", image, image_headers)[0],
             409,
         )
+
+    def test_timed_photo_requires_bounded_minutes_and_a_matching_committed_recipe(self):
+        self.assertEqual(self.request("POST", "/api/photo/display")[0], 415)
+        for value in (
+            {},
+            {"duration_minutes": True},
+            {"duration_minutes": 29},
+            {"duration_minutes": 1441},
+            {"duration_minutes": 30.5},
+            {"duration_minutes": 30, "extra": True},
+        ):
+            body = json.dumps(value).encode()
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            }
+            self.assertEqual(
+                self.request("POST", "/api/photo/display", body, headers)[0],
+                422,
+                value,
+            )
+
+        body = json.dumps({"duration_minutes": 30}).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        }
+        self.assertEqual(
+            self.request("POST", "/api/photo/display", body, headers)[0],
+            409,
+        )
+
+        Image.new("RGB", (80, 60), (45, 90, 130)).save(self.server.photo_path)
+        settings = default_settings(self.catalog)
+        settings["photo"].update(
+            {
+                "enabled": True,
+                "rotation": 90,
+                "caption": "Summer evening",
+                "crop": {"center_x": 0.35, "center_y": 0.7, "zoom": 1.8},
+            }
+        )
+        settings = self.server.httpd.store.save(settings)
+        expected_recipe = photo_recipe_digest(
+            self.server.photo_path,
+            settings["photo"]["rotation"],
+            settings["photo"]["caption"],
+            settings["photo"]["crop"],
+            target_size=(1600, 1200),
+        )
+
+        self.commit_photo_preview("f" * 64)
+        self.assertEqual(
+            self.request("POST", "/api/photo/display", body, headers)[0],
+            409,
+        )
+        self.assertFalse(self.demo_store.path.exists())
+
+        self.commit_photo_preview(expected_recipe)
+        body = json.dumps({"duration_minutes": 75}).encode()
+        headers["Content-Length"] = str(len(body))
+        status, _response_headers, payload = self.request(
+            "POST",
+            "/api/photo/display",
+            body,
+            headers,
+        )
+        self.assertEqual(status, 200, payload)
+        active = json.loads(payload)
+        self.assertTrue(active["active"])
+        self.assertEqual(active["mode"], "uploaded-photo")
+        self.assertEqual(active["duration_seconds"], 75 * 60)
+        self.assertEqual(active["remaining_seconds"], 75 * 60)
+
+    def test_timed_photo_rejects_a_stale_recipe_after_crop_changes(self):
+        Image.new("RGB", (80, 60), (45, 90, 130)).save(self.server.photo_path)
+        settings = default_settings(self.catalog)
+        settings["photo"]["enabled"] = True
+        settings = self.server.httpd.store.save(settings)
+        recipe = photo_recipe_digest(
+            self.server.photo_path,
+            settings["photo"]["rotation"],
+            settings["photo"]["caption"],
+            settings["photo"]["crop"],
+            target_size=(1600, 1200),
+        )
+        self.commit_photo_preview(recipe)
+
+        settings["photo"]["crop"]["zoom"] = 2.0
+        self.server.httpd.store.save(settings)
+        body = json.dumps({"duration_minutes": 120}).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        }
+        status, _response_headers, payload = self.request(
+            "POST",
+            "/api/photo/display",
+            body,
+            headers,
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("does not match", json.loads(payload)["error"])
+        self.assertFalse(self.demo_store.path.exists())
 
     def test_public_photo_upload_is_normalized_and_visible(self):
         source = io.BytesIO()

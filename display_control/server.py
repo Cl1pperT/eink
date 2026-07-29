@@ -29,9 +29,16 @@ from urllib.parse import urlsplit
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from display_simulator.color_management import convert_to_srgb
+from display_simulator.sources.uploaded_photo import photo_recipe_digest
 
 from .birds import BirdWeatherCache
-from .demo import DEMO_MODES, DemoOverrideError, DemoOverrideStore
+from .demo import (
+    DEMO_MODES,
+    PHOTO_MAX_DURATION_SECONDS,
+    PHOTO_MIN_DURATION_SECONDS,
+    DemoOverrideError,
+    DemoOverrideStore,
+)
 from .settings import (
     Catalog,
     SCHEMA_VERSION,
@@ -100,7 +107,7 @@ INDEX_HTML = r"""<!doctype html>
           <div><p class="eyebrow">Diagnostic preview</p><h3 id="demo-title">Five-minute demo</h3></div>
           <span id="demo-status" class="demo-badge">Automatic</span>
         </div>
-        <p class="muted demo-intro">Temporarily choose the latest saved artwork. Press the physical button on the frame to show it now; no schedule setting is changed.</p>
+        <p class="muted demo-intro">Temporarily choose the latest saved artwork. Use its physical mode button—or hold any two buttons for Image—to show it now; no schedule setting is changed.</p>
         <div class="demo-grid" role="group" aria-label="Choose five-minute demo artwork">
           <button class="demo-option" type="button" data-demo-mode="weather"><span aria-hidden="true">☀</span><b>Weather</b><small>Forecast artwork</small></button>
           <button class="demo-option" type="button" data-demo-mode="birds"><span aria-hidden="true">♩</span><b>Birds</b><small>Avian visitors</small></button>
@@ -214,7 +221,15 @@ INDEX_HTML = r"""<!doctype html>
     <section id="panel-photo" class="panel" aria-labelledby="photo-title">
       <div class="section-heading"><div><p class="eyebrow">Your artwork</p><h2 id="photo-title">Personal photo</h2><p>Upload from your camera roll. The frame color-manages the image and tunes it for the six physical inks.</p></div></div>
       <article class="card photo-card">
-        <div id="photo-preview" class="photo-preview empty-preview"><span>▣</span><p>No photo uploaded yet</p></div>
+        <div class="photo-editor">
+          <div id="photo-preview" class="photo-preview empty-preview" aria-label="Four by three frame crop preview">
+            <canvas id="photo-crop-canvas" width="800" height="600"></canvas>
+            <div id="photo-preview-empty" class="photo-preview-empty"><span>▣</span><p>No photo uploaded yet</p></div>
+            <span class="crop-label" aria-hidden="true">FRAME CROP</span>
+            <span class="battery-safe-mark" aria-hidden="true">91/100</span>
+          </div>
+          <p class="helper crop-helper">Drag the image to choose what stays in frame. The small corner signature reserves room for the battery estimate.</p>
+        </div>
         <label class="upload-button"><input id="photo-file" type="file" accept="image/png,image/jpeg,image/webp" hidden><span>↑</span><b>Choose a photo</b></label>
         <p id="photo-filename" class="file-name">PNG, JPEG, or WebP · up to 20 MB</p>
       </article>
@@ -224,6 +239,30 @@ INDEX_HTML = r"""<!doctype html>
           <label class="field span-2"><span>Photo caption</span><input id="photo-caption" maxlength="200" placeholder="Optional caption"></label>
           <label class="field"><span>Rotation</span><select id="photo-rotation"><option value="0">No rotation</option><option value="90">90° clockwise</option><option value="180">180°</option><option value="270">90° counter-clockwise</option></select></label>
         </div>
+        <div class="crop-controls">
+          <label class="field crop-zoom"><span>Crop zoom <output id="photo-zoom-output">1.00×</output></span><input id="photo-zoom" type="range" min="1" max="8" step="0.01" value="1"></label>
+          <button id="photo-crop-reset" class="outline-button" type="button">Center crop</button>
+        </div>
+      </article>
+      <article class="card photo-display-card" aria-labelledby="photo-display-title">
+        <div class="card-title"><div><p class="eyebrow">Temporary display</p><h3 id="photo-display-title">Prepare &amp; display</h3></div><span id="photo-display-badge" class="freshness unavailable">Not active</span></div>
+        <p class="muted">Choose how long the prepared image should remain. Its timer starts only after the new frame has finished rendering.</p>
+        <div class="photo-duration-row">
+          <label class="field"><span>Duration in minutes</span><input id="photo-duration" type="number" inputmode="numeric" min="30" max="1440" step="1" value="120"></label>
+          <div class="duration-presets" role="group" aria-label="Common image display durations">
+            <button type="button" data-photo-duration="30">30m</button>
+            <button type="button" data-photo-duration="60">1h</button>
+            <button type="button" data-photo-duration="240">4h</button>
+            <button type="button" data-photo-duration="720">12h</button>
+            <button type="button" data-photo-duration="1440">24h</button>
+          </div>
+        </div>
+        <button id="prepare-photo-display" class="inline-primary photo-display-action" type="button" disabled>Prepare &amp; display image</button>
+        <div id="photo-display-active" class="demo-active hidden" aria-live="polite">
+          <div><b id="photo-display-active-title">Image ready</b><small id="photo-display-countdown" role="timer"></small></div>
+          <button id="photo-display-end" class="demo-cancel" type="button">End early</button>
+        </div>
+        <p id="photo-display-note" class="helper">After preparation, hold any two frame buttons together to request the image.</p>
       </article>
       <div id="upload-progress" class="notice hidden" role="status"></div>
     </section>
@@ -246,9 +285,10 @@ APP_CSS = r"""
 .tabs{grid-template-columns:repeat(6,1fr)}.card-title{gap:12px}.render-row{display:flex;align-items:center;gap:16px;margin-top:17px;padding-top:15px;border-top:1px solid #e4e6dc}.render-row p{margin:0;flex:1;font-size:12px}.inline-primary,.gallery-link{border:0;border-radius:12px;background:var(--forest);color:#fff;font-weight:800;text-decoration:none;padding:11px 14px;cursor:pointer;white-space:nowrap}.inline-primary:disabled{opacity:.45;cursor:not-allowed}.bird-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(260px,.85fr);gap:20px}.bird-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:linear-gradient(145deg,#e8eee4,#d5dfd1);display:grid;place-items:center;border:1px solid #d5dccf}.bird-preview-shell>*{grid-area:1/1}.bird-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.bird-preview-empty{text-align:center;color:#6d7c70;padding:20px}.bird-preview-empty span{display:block;font-size:42px;margin-bottom:8px}.bird-preview-empty p{font-size:12px;line-height:1.4;margin:0}.bird-mini-copy{align-self:center}.freshness,.provider-chip{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;font-size:9px;letter-spacing:.08em;font-weight:850;white-space:nowrap}.freshness{background:#e4eee3;color:#356246}.freshness.stale{background:#f3e4c8;color:#855b19}.freshness.loading{background:#e9e7df;color:#6d7069}.freshness.unavailable{background:#f4dfda;color:#843c31}.provider-chip{background:#e8eee4;color:#346051}.bird-mini-list{list-style:none;padding:0;margin:12px 0 18px;display:grid;gap:8px}.bird-mini-list li{display:grid;grid-template-columns:1fr auto;gap:10px;border-bottom:1px solid #e5e7df;padding:0 0 8px;font-size:13px}.bird-mini-list b{font-weight:750}.bird-mini-list span{color:#718075;font-size:11px}.gallery-link{display:inline-flex;align-items:center;justify-content:space-between;gap:18px}.gallery-link span{font-size:18px}
 .star-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr);gap:22px;background:linear-gradient(145deg,#fffdf8 50%,#eef0e9)}.star-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:radial-gradient(circle at 50% 110%,#263e46,#13242e 58%,#0d1720);display:grid;place-items:center;border:1px solid #293f46}.star-preview-shell>*{grid-area:1/1}.star-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.star-preview-empty{text-align:center;color:#d5dfd3;padding:20px}.star-preview-empty span{display:block;color:#f0bd51;font-size:46px;margin-bottom:8px}.star-preview-empty p{font-size:12px;line-height:1.4;margin:0}.star-mini-copy{align-self:center}.direction-field{border-top:1px solid #e2e5dc;margin-top:17px;padding-top:15px}.direction-label{display:block;font-size:12px;font-weight:800;margin-bottom:9px}.compass-picker{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.compass-picker button{appearance:none;border:1px solid #cdd5ca;background:#fff;border-radius:12px;min-height:63px;padding:7px 4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}.compass-picker b{font:600 22px/1 Georgia,serif}.compass-picker small{font-size:9px;color:#748075}.compass-picker button.active{background:#173b35;border-color:#173b35;color:#fff;box-shadow:0 5px 14px #173b3533}.compass-picker button.active small{color:#dce8df}.star-actions{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:15px}.outline-button{border:1px solid #7c9587;border-radius:12px;background:#fff;color:var(--forest);font-weight:800;padding:10px 12px;cursor:pointer}.outline-button:disabled{opacity:.43;cursor:not-allowed}
 .demo-intro{font-size:13px;margin:-4px 0 16px}.demo-badge{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;background:#e9e7df;color:#6d7069;font-size:9px;letter-spacing:.08em;font-weight:850;text-transform:uppercase;white-space:nowrap}.demo-badge.active{background:#f4dfaa;color:#795612}.demo-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.demo-option{appearance:none;border:1px solid #d8ddd2;border-radius:15px;background:#fbfcf8;min-height:105px;padding:13px 9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;transition:.18s}.demo-option span{font-size:25px;color:var(--forest);line-height:1}.demo-option b{font-size:13px}.demo-option small{font-size:10px;color:#748075}.demo-option:hover{border-color:#7c9a8b;transform:translateY(-1px)}.demo-option.active{background:var(--forest);border-color:var(--forest);color:#fff;box-shadow:0 6px 16px #1d514533}.demo-option.active span,.demo-option.active small{color:#fff}.demo-option:disabled{opacity:.42;cursor:not-allowed;transform:none}.demo-active{margin-top:13px;border-radius:14px;background:#f5e8c7;padding:12px 13px;display:flex;align-items:center;gap:12px}.demo-active div{display:flex;flex-direction:column;gap:2px;flex:1}.demo-active small{color:#78633d;font-variant-numeric:tabular-nums}.demo-cancel{border:1px solid #c9aa68;background:#fff9eb;border-radius:10px;padding:8px 10px;font-size:11px;font-weight:800;cursor:pointer}.demo-cancel:disabled{opacity:.45;cursor:not-allowed}
+.photo-editor{min-width:0}.photo-preview{position:relative;display:block;touch-action:none;cursor:grab;border-style:solid;user-select:none}.photo-preview.dragging{cursor:grabbing}.photo-preview canvas{display:block;width:100%;height:100%;aspect-ratio:4/3;background:#e9ece4}.photo-preview-empty{position:absolute;inset:0;display:grid;place-content:center;gap:6px;color:#718074;pointer-events:none}.photo-preview-empty span{font-size:37px}.photo-preview-empty p{font-size:13px;margin:0}.crop-label{position:absolute;left:9px;top:9px;border-radius:99px;padding:5px 7px;background:#172f2ac9;color:#fff;font-size:8px;font-weight:850;letter-spacing:.12em;pointer-events:none}.battery-safe-mark{position:absolute;right:10px;bottom:7px;color:#fff;font:italic 11px Georgia,serif;text-shadow:0 1px 3px #000,0 0 7px #000;pointer-events:none}.empty-preview .crop-label,.empty-preview .battery-safe-mark{display:none}.crop-helper{margin:10px 2px 16px;text-align:left}.crop-controls{display:grid;grid-template-columns:1fr auto;align-items:end;gap:14px;margin-top:18px;padding-top:17px;border-top:1px solid #e4e6dc}.crop-zoom output{float:right;font-variant-numeric:tabular-nums}.crop-controls .outline-button{min-height:44px}.photo-display-card{background:linear-gradient(145deg,#fffdf8,#eef3e9)}.photo-duration-row{display:grid;grid-template-columns:minmax(155px,.65fr) 1fr;align-items:end;gap:14px}.duration-presets{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}.duration-presets button{appearance:none;min-height:45px;border:1px solid #ccd4c8;background:#fff;border-radius:11px;font-size:11px;font-weight:800;cursor:pointer}.duration-presets button.active{background:var(--forest);border-color:var(--forest);color:#fff}.photo-display-action{width:100%;margin-top:16px;min-height:48px}.photo-display-card>.demo-active{margin-top:13px}.photo-display-card>.helper{margin-bottom:0}
 @media(max-width:640px){.hero{padding-left:17px;padding-right:17px}.pill{font-size:0;padding:9px}.pill i{margin:0}.hero-copy .eyebrow{font-size:9px}.stat-grid{gap:7px}.stat{padding:13px 11px}.stat strong{font-size:21px}.stat small{font-size:10px}.field-grid{grid-template-columns:1fr}.field.span-2{grid-column:auto}.field-switch{margin-top:4px}.location-grid{grid-template-columns:1fr}.location-card{min-height:155px}.activity-toolbar{top:78px;margin-left:-3px;margin-right:-3px}.save-bar{padding-left:13px}.save-bar span b{display:none}.secondary-button{padding-left:8px;padding-right:8px}.metric-head,.metric-row{grid-template-columns:122px repeat(5,66px) 62px}}
-@media(max-width:700px){.tabs{display:flex;overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity}.tabs::-webkit-scrollbar{display:none}.tab{font-size:9px;flex:0 0 76px;scroll-snap-align:start}.tab span{font-size:17px}.bird-mini,.star-mini{grid-template-columns:1fr}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}.star-actions{grid-template-columns:1fr}.demo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.demo-option{min-height:96px}}
-@media(min-width:780px){.tabs{width:760px}.panel{padding-top:5px}.photo-card{display:grid;grid-template-columns:1.25fr .75fr;gap:18px;align-items:center}.photo-preview{grid-row:span 2;margin:0}.location-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.tabs{display:flex;overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity}.tabs::-webkit-scrollbar{display:none}.tab{font-size:9px;flex:0 0 76px;scroll-snap-align:start}.tab span{font-size:17px}.bird-mini,.star-mini{grid-template-columns:1fr}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}.star-actions{grid-template-columns:1fr}.demo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.demo-option{min-height:96px}.photo-duration-row{grid-template-columns:1fr}.duration-presets button{min-height:44px}.crop-controls{grid-template-columns:1fr}.crop-controls .outline-button{width:100%}}
+@media(min-width:780px){.tabs{width:760px}.panel{padding-top:5px}.photo-card{display:grid;grid-template-columns:1.25fr .75fr;gap:18px;align-items:center}.photo-card .photo-editor{grid-row:span 2}.photo-preview{margin:0}.location-grid{grid-template-columns:repeat(3,1fr)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 """
 
@@ -262,6 +302,7 @@ APP_JS = r"""
   const starDirectionLabels={north:'North',east:'East',south:'South',west:'West'};
   const starDirectionCardinals={north:'N',east:'E',south:'S',west:'W'};
   let catalog=null, settings=null, baseline='', photoAvailable=false, birdSummaryTimer=null, starSummaryTimer=null, starSummary=null, renderPollTimer=null, demoState=null, demoDeadline=0, demoTimer=null, demoBusy=false;
+  let photoEditorImage=null,photoObjectUrl='',photoDrag=null,photoDrawFrame=null,photoUploadBusy=false,photoDisplayBusy=false;
 
   function clearLegacyToken(){
     const url=new URL(location.href);
@@ -282,7 +323,8 @@ APP_JS = r"""
   function bindBasics(){
     $('#location-name').value=settings.display.location_name; $('#units').value=settings.display.units; $('#display-caption').checked=settings.display.caption; $('#display-mode').value=settings.display.mode;
     $('#recommendation-count').value=settings.recommendation_count; $('#minimum-suitability').value=settings.minimum_suitability; updateSuitability();
-    $('#photo-enabled').checked=settings.photo.enabled; $('#photo-caption').value=settings.photo.caption; $('#photo-rotation').value=settings.photo.rotation;
+    settings.photo.crop??={center_x:.5,center_y:.5,zoom:1};
+    $('#photo-enabled').checked=settings.photo.enabled; $('#photo-caption').value=settings.photo.caption; $('#photo-rotation').value=settings.photo.rotation;$('#photo-zoom').value=settings.photo.crop.zoom;updatePhotoZoom();
     $('#bird-postal-code').value=settings.birds.postal_code; $('#bird-country').value=settings.birds.country; $('#bird-lookback').value=String(settings.birds.lookback_days); $('#bird-title').value=settings.birds.title; $('#bird-subtitle').value=settings.birds.subtitle;
     $('#location-name').oninput=e=>{settings.display.location_name=e.target.value;setDirty()};
     $('#units').onchange=e=>{settings.display.units=e.target.value;setDirty()};
@@ -292,7 +334,7 @@ APP_JS = r"""
     $('#minimum-suitability').oninput=e=>{settings.minimum_suitability=Number(e.target.value);updateSuitability();setDirty()};
     $('#photo-enabled').onchange=e=>{settings.photo.enabled=e.target.checked;updateStats();setDirty()};
     $('#photo-caption').oninput=e=>{settings.photo.caption=e.target.value;setDirty()};
-    $('#photo-rotation').onchange=e=>{settings.photo.rotation=Number(e.target.value);setDirty()};
+    $('#photo-rotation').onchange=e=>{settings.photo.rotation=Number(e.target.value);requestPhotoDraw();setDirty()};
     $('#bird-postal-code').oninput=e=>{settings.birds.postal_code=e.target.value;setDirty()};
     $('#bird-country').oninput=e=>{settings.birds.country=e.target.value.toLowerCase();setDirty()};
     $('#bird-lookback').onchange=e=>{settings.birds.lookback_days=Number(e.target.value);setDirty()};
@@ -344,8 +386,50 @@ APP_JS = r"""
       $('.restore-activity',item).onclick=()=>{delete settings.activity_overrides[activity.id];renderActivities();setDirty();toast(`${activity.name} restored`)};list.append(item);
     });$('#activity-empty').classList.toggle('hidden',shown!==0);updateStats();
   }
+  function photoCrop(){
+    settings.photo.crop??={center_x:.5,center_y:.5,zoom:1};return settings.photo.crop;
+  }
+  function photoGeometry(){
+    if(!photoEditorImage)return null;
+    const rotation=Number(settings.photo.rotation)||0,sourceWidth=photoEditorImage.naturalWidth,sourceHeight=photoEditorImage.naturalHeight,rotatedWidth=rotation%180?sourceHeight:sourceWidth,rotatedHeight=rotation%180?sourceWidth:sourceHeight,targetAspect=4/3,sourceAspect=rotatedWidth/rotatedHeight;
+    const baseWidth=sourceAspect>=targetAspect?rotatedHeight*targetAspect:rotatedWidth,baseHeight=sourceAspect>=targetAspect?rotatedHeight:rotatedWidth/targetAspect,crop=photoCrop(),zoom=Math.max(1,Math.min(8,Number(crop.zoom)||1)),width=Math.max(1,baseWidth/zoom),height=Math.max(1,baseHeight/zoom);
+    const centerX=Number(crop.center_x),centerY=Number(crop.center_y);crop.zoom=zoom;crop.center_x=Number.isFinite(centerX)?Math.max(0,Math.min(1,centerX)):.5;crop.center_y=Number.isFinite(centerY)?Math.max(0,Math.min(1,centerY)):.5;
+    const left=Math.min(rotatedWidth-width,Math.max(0,crop.center_x*rotatedWidth-width/2)),top=Math.min(rotatedHeight-height,Math.max(0,crop.center_y*rotatedHeight-height/2));crop.center_x=(left+width/2)/rotatedWidth;crop.center_y=(top+height/2)/rotatedHeight;
+    return{rotation,sourceWidth,sourceHeight,rotatedWidth,rotatedHeight,width,height,left,top};
+  }
+  function drawPhotoCrop(){
+    photoDrawFrame=null;const canvas=$('#photo-crop-canvas'),context=canvas.getContext('2d'),geometry=photoGeometry();context.setTransform(1,0,0,1,0,0);context.clearRect(0,0,canvas.width,canvas.height);if(!geometry)return;
+    context.save();context.scale(canvas.width/geometry.width,canvas.height/geometry.height);context.translate(-geometry.left,-geometry.top);
+    if(geometry.rotation===90){context.translate(geometry.sourceHeight,0);context.rotate(Math.PI/2)}
+    else if(geometry.rotation===180){context.translate(geometry.sourceWidth,geometry.sourceHeight);context.rotate(Math.PI)}
+    else if(geometry.rotation===270){context.translate(0,geometry.sourceWidth);context.rotate(-Math.PI/2)}
+    context.drawImage(photoEditorImage,0,0);context.restore();
+  }
+  function requestPhotoDraw(){if(photoDrawFrame===null)photoDrawFrame=requestAnimationFrame(drawPhotoCrop)}
+  function updatePhotoZoom(){
+    if(!settings)return;const zoom=Math.max(1,Math.min(8,Number($('#photo-zoom').value)||1));photoCrop().zoom=zoom;$('#photo-zoom-output').textContent=`${zoom.toFixed(2)}×`;requestPhotoDraw();
+  }
+  function releasePhotoObjectUrl(){if(photoObjectUrl){URL.revokeObjectURL(photoObjectUrl);photoObjectUrl=''}}
+  function loadPhotoEditor(url,{objectUrl=false}={}){
+    return new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>{photoEditorImage=image;if(objectUrl)photoObjectUrl=url;const preview=$('#photo-preview');preview.classList.remove('empty-preview');$('#photo-preview-empty').classList.add('hidden');requestPhotoDraw();resolve()};image.onerror=()=>reject(new Error('The selected image could not be previewed'));image.src=url});
+  }
   function renderPhoto(){
-    const preview=$('#photo-preview');if(photoAvailable){preview.className='photo-preview';preview.innerHTML=`<img alt="Uploaded frame photo" src="/api/photo?v=${Date.now()}">`}else{preview.className='photo-preview empty-preview';preview.innerHTML='<span>▣</span><p>No photo uploaded yet</p>'}
+    const preview=$('#photo-preview');preview.classList.toggle('empty-preview',!photoAvailable);$('#photo-preview-empty').classList.toggle('hidden',photoAvailable);
+    $('#prepare-photo-display').disabled=!photoAvailable||photoUploadBusy||photoDisplayBusy;
+    if(photoAvailable&&!photoEditorImage)loadPhotoEditor(`/api/photo?v=${Date.now()}`).catch(error=>toast(error.message,true));
+    if(!photoAvailable){photoEditorImage=null;requestPhotoDraw()}
+  }
+  function resetPhotoCrop(){
+    settings.photo.crop={center_x:.5,center_y:.5,zoom:1};$('#photo-zoom').value='1';updatePhotoZoom();setDirty();
+  }
+  function startPhotoDrag(event){
+    if(!photoEditorImage||photoUploadBusy||photoDisplayBusy||event.button>0)return;const geometry=photoGeometry();if(!geometry)return;event.preventDefault();event.currentTarget.setPointerCapture(event.pointerId);photoDrag={pointerId:event.pointerId,x:event.clientX,y:event.clientY,center_x:photoCrop().center_x,center_y:photoCrop().center_y,geometry};event.currentTarget.classList.add('dragging');
+  }
+  function movePhotoDrag(event){
+    if(!photoDrag||event.pointerId!==photoDrag.pointerId)return;event.preventDefault();const bounds=event.currentTarget.getBoundingClientRect(),crop=photoCrop(),geometry=photoDrag.geometry;crop.center_x=photoDrag.center_x-(event.clientX-photoDrag.x)*geometry.width/(Math.max(1,bounds.width)*geometry.rotatedWidth);crop.center_y=photoDrag.center_y-(event.clientY-photoDrag.y)*geometry.height/(Math.max(1,bounds.height)*geometry.rotatedHeight);photoGeometry();requestPhotoDraw();setDirty();
+  }
+  function endPhotoDrag(event){
+    if(!photoDrag||event.pointerId!==photoDrag.pointerId)return;photoDrag=null;event.currentTarget.classList.remove('dragging');
   }
   function renderStars(){
     const selected=settings.stars.direction;
@@ -382,10 +466,26 @@ APP_JS = r"""
     const active=Boolean(demoState&&demoState.active),activeMode=active?demoState.mode:null;
     $$('[data-demo-mode]').forEach(button=>{const mode=button.dataset.demoMode;button.classList.toggle('active',mode===activeMode);button.disabled=demoBusy||(mode==='uploaded-photo'&&!photoAvailable);button.setAttribute('aria-pressed',String(mode===activeMode))});
     const badge=$('#demo-status'),row=$('#demo-active');badge.textContent=active?'Demo active':'Automatic';badge.className=`demo-badge${active?' active':''}`;row.classList.toggle('hidden',!active);$('#demo-cancel').disabled=demoBusy;
-    if(active){$('#demo-active-title').textContent=`${demoLabels[activeMode]} selected`;$('#demo-countdown').textContent=demoClock(demoState.remaining_seconds);$('#demo-note').textContent='Press the physical frame button now. When the timer ends, the next refresh resumes your normal display setting.'}
+    if(active){const imageSelection=activeMode==='uploaded-photo',timedPhoto=imageSelection&&Number(demoState.duration_seconds)>=1800;$('#demo-active-title').textContent=timedPhoto?'Timed image active':`${demoLabels[activeMode]} selected`;$('#demo-countdown').textContent=demoClock(demoState.remaining_seconds);$('#demo-note').textContent=imageSelection?'Hold any two frame buttons together to request the image. When its timer ends, the next refresh resumes your normal display setting.':'Press its physical mode button now. When the timer ends, the next refresh resumes your normal display setting.'}
     else{$('#demo-note').textContent='After five minutes, the next button press or automatic device check returns to your normal display setting.'}
     $('#demo-image').title=photoAvailable?'Show the uploaded image for five minutes':'Upload an image first';
     const starDemo=$('#demo-stars'),activeStar=active&&activeMode==='star-map',starReady=starDemo.dataset.ready==='true';starDemo.disabled=demoBusy||(!activeStar&&!starReady);starDemo.textContent=activeStar?'End Stars demo':'Show for five minutes';
+    renderPhotoDisplay();
+  }
+  function formatPhotoDuration(minutes){const value=Math.max(0,Number(minutes)||0),hours=Math.floor(value/60),remainder=value%60;if(!hours)return`${remainder} minute${remainder===1?'':'s'}`;return`${hours} hour${hours===1?'':'s'}${remainder?` ${remainder} minutes`:''}`}
+  function selectedPhotoDuration(){
+    const input=$('#photo-duration'),value=Number(input.value);return Number.isInteger(value)&&value>=30&&value<=1440?value:null;
+  }
+  function renderDurationPresets(){
+    const selected=selectedPhotoDuration();$$('[data-photo-duration]').forEach(button=>button.classList.toggle('active',Number(button.dataset.photoDuration)===selected));
+  }
+  function renderPhotoDisplay(){
+    if(!$('#photo-display-badge'))return;const active=Boolean(demoState&&demoState.active&&demoState.mode==='uploaded-photo'),timed=active&&Number(demoState.duration_seconds)>=1800,badge=$('#photo-display-badge'),row=$('#photo-display-active'),button=$('#prepare-photo-display');
+    badge.textContent=timed?'Image active':active?'Five-minute demo':'Not active';badge.className=`freshness ${active?'fresh':'unavailable'}`;row.classList.toggle('hidden',!active);button.disabled=!photoAvailable||photoUploadBusy||photoDisplayBusy;button.textContent=photoDisplayBusy?'Preparing image…':'Prepare & display image';$('#photo-display-end').disabled=photoDisplayBusy||demoBusy;
+    if(active){$('#photo-display-active-title').textContent=timed?`Image set for ${formatPhotoDuration(Math.round(Number(demoState.duration_seconds)/60))}`:'Five-minute image demo';$('#photo-display-countdown').textContent=demoClock(demoState.remaining_seconds);$('#photo-display-note').textContent='Hold any two frame buttons together to request the image. It will return to the normal schedule when this timer ends.'}
+    else if(photoDisplayBusy)$('#photo-display-note').textContent='Saving the crop and rendering a fresh six-color frame…';
+    else $('#photo-display-note').textContent='After preparation, hold any two frame buttons together to request the image.';
+    renderDurationPresets();
   }
   function tickDemo(){
     if(!demoState||!demoState.active)return;const remaining=Math.max(0,Math.ceil((demoDeadline-Date.now())/1000));demoState={...demoState,remaining_seconds:remaining};
@@ -399,7 +499,7 @@ APP_JS = r"""
   async function loadDemo(){try{applyDemoState(await api('/api/demo'))}catch(error){toast(`Demo status unavailable: ${error.message}`,true)}}
   async function startDemo(mode){
     if(demoBusy)return;if(mode==='uploaded-photo'&&!photoAvailable){toast('Upload an image first',true);return}demoBusy=true;renderDemo();
-    try{const value=await api('/api/demo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});applyDemoState(value);toast(`${demoLabels[mode]} demo active · press the frame button`)}
+    try{const value=await api('/api/demo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});applyDemoState(value);toast(mode==='uploaded-photo'?'Image demo active · hold any two frame buttons':`${demoLabels[mode]} demo active · press its mode button`)}
     catch(error){toast(error.message,true)}
     finally{demoBusy=false;renderDemo()}
   }
@@ -435,6 +535,35 @@ APP_JS = r"""
     try{if(snapshot()!==baseline)await save(false);const result=await api('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});toast(result.queued?'Render queued':'That mode is already queued');pollRender(mode)}
     catch(error){toast(error.message,true)}
   }
+  async function waitForRenderCompletion(mode){
+    clearTimeout(renderPollTimer);renderPollTimer=null;const deadline=Date.now()+31*60*1000;
+    while(Date.now()<deadline){
+      const status=await api('/api/render/status'),pending=status.queued_modes||[];
+      if(status.state==='disabled')throw new Error('Runtime rendering is not configured');
+      if(status.mode===mode&&status.state==='failed'&&!pending.includes(mode))throw new Error('The image render failed; the previous frame was kept');
+      if(status.mode===mode&&status.state==='complete'&&!pending.includes(mode))return;
+      await new Promise(resolve=>setTimeout(resolve,1500));
+    }
+    throw new Error('The image render did not finish in time');
+  }
+  async function preparePhotoDisplay(){
+    if(photoDisplayBusy)return;if(!photoAvailable){toast('Upload an image first',true);return}const duration=selectedPhotoDuration();if(duration===null){toast('Choose from 30 to 1,440 whole minutes',true);$('#photo-duration').focus();return}
+    photoDisplayBusy=true;renderPhotoDisplay();let failure=null;
+    try{
+      settings.photo.enabled=true;$('#photo-enabled').checked=true;updateStats();await save(false);
+      await api('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'uploaded-photo'})});
+      await waitForRenderCompletion('uploaded-photo');
+      const value=await api('/api/photo/display',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_minutes:duration})});
+      applyDemoState(value);toast(`Image ready for ${formatPhotoDuration(duration)} · hold any two buttons`);
+    }catch(error){failure=error.message;toast(error.message,true)}
+    finally{photoDisplayBusy=false;renderPhotoDisplay();if(failure)$('#photo-display-note').textContent=failure}
+  }
+  async function endPhotoDisplay(){
+    if(photoDisplayBusy||demoBusy)return;demoBusy=true;renderPhotoDisplay();
+    try{applyDemoState(await api('/api/demo',{method:'DELETE'}));toast('Timed image ended · normal display restored')}
+    catch(error){toast(error.message,true)}
+    finally{demoBusy=false;renderPhotoDisplay()}
+  }
   async function pollRender(mode){
     clearTimeout(renderPollTimer);
     try{const status=await api('/api/render/status'),pending=status.queued_modes||[];if(status.state==='disabled')return;if(status.mode===mode&&status.state==='complete'&&!pending.includes(mode)){toast(`${mode.replace(/-/g,' ')} frame is ready`);if(mode==='birds')loadBirdSummary();if(mode==='star-map')loadStarSummary();return}if(status.mode===mode&&status.state==='failed'&&!pending.includes(mode)){toast(`${mode.replace(/-/g,' ')} render failed`,true);return}renderPollTimer=setTimeout(()=>pollRender(mode),1500)}
@@ -447,13 +576,21 @@ APP_JS = r"""
   }
   async function resetAll(){if(!confirm('Restore every location, activity, and display setting to its default? Your uploaded photo will not be deleted.'))return;try{settings=await api('/api/settings/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});baseline=snapshot();renderAll();toast('Defaults restored')}catch(error){toast(error.message,true)}}
   async function uploadPhoto(file){
-    if(!file)return;$('#photo-filename').textContent=file.name;const notice=$('#upload-progress');notice.textContent='Preparing and uploading photo…';notice.classList.remove('hidden','error');
-    try{settings.photo.enabled=true;await save(false);const body=new FormData();body.append('photo',file);const result=await api('/api/photo',{method:'POST',body});photoAvailable=true;renderPhoto();renderDemo();updateStats();notice.textContent=result.render_configured?(result.render_queued?'Photo uploaded. Its frame render has been queued.':'Photo uploaded. A frame render is already queued.'):'Photo uploaded successfully.';toast(result.render_configured?'Photo uploaded · render queued':'Photo uploaded');if(result.render_configured)pollRender('uploaded-photo')}
-    catch(error){notice.textContent=error.message;notice.classList.add('error');toast(error.message,true)}
+    if(!file)return;$('#photo-filename').textContent=file.name;const notice=$('#upload-progress');notice.textContent='Preparing and uploading photo…';notice.classList.remove('hidden','error');photoUploadBusy=true;renderPhotoDisplay();
+    try{settings.photo.enabled=true;$('#photo-enabled').checked=true;await save(false);const body=new FormData();body.append('photo',file);const result=await api('/api/photo',{method:'POST',body});photoAvailable=true;renderPhoto();renderDemo();updateStats();notice.textContent=result.render_configured?(result.render_queued?'Photo uploaded. Adjust the crop, then choose Prepare & display.':'Photo uploaded. Adjust the crop, then choose Prepare & display.'):'Photo uploaded successfully.';toast(result.render_configured?'Photo uploaded · crop when ready':'Photo uploaded');if(result.render_configured)pollRender('uploaded-photo')}
+    catch(error){notice.textContent=error.message;notice.classList.add('error');throw error}
+    finally{photoUploadBusy=false;renderPhoto();renderPhotoDisplay()}
+  }
+  async function choosePhoto(file){
+    if(!file)return;releasePhotoObjectUrl();resetPhotoCrop();const url=URL.createObjectURL(file);
+    try{await loadPhotoEditor(url,{objectUrl:true});await uploadPhoto(file)}
+    catch(error){URL.revokeObjectURL(url);photoObjectUrl='';photoEditorImage=null;if(photoAvailable)loadPhotoEditor(`/api/photo?v=${Date.now()}`).catch(()=>{});toast(error.message,true)}
+    finally{$('#photo-file').value=''}
   }
   function renderAll(){bindBasics();renderLocations();renderActivities();renderPhoto();renderStars();renderDemo();updateStats();setDirty()}
   async function load(){
     $('#loading').classList.remove('hidden');$('#fatal').classList.add('hidden');
+    releasePhotoObjectUrl();photoEditorImage=null;requestPhotoDraw();
     try{const [cat,stored,health,demo]=await Promise.all([api('/api/catalog'),api('/api/settings'),api('/healthz'),api('/api/demo')]);catalog=cat;settings=stored;photoAvailable=Boolean(health.photo_available);baseline=snapshot();renderAll();applyDemoState(demo);loadBirdSummary();loadStarSummary();$('#connection-pill').className='pill online';$('#connection-pill').innerHTML='<i></i>Online'}
     catch(error){$('#connection-pill').className='pill offline';$('#connection-pill').innerHTML='<i></i>Offline';$('#fatal').textContent=error.message;$('#fatal').classList.remove('hidden')}
     finally{$('#loading').classList.add('hidden')}
@@ -461,7 +598,9 @@ APP_JS = r"""
   clearLegacyToken();$$('.tab').forEach(button=>button.onclick=()=>switchTab(button.dataset.tab));$('#activity-search').oninput=renderActivities;
   $('#enable-all').onclick=()=>{settings.enabled_activities=catalog.activities.map(a=>a.id);renderActivities();setDirty()};$('#disable-all').onclick=()=>{settings.enabled_activities=[];renderActivities();setDirty()};
   $$('[data-demo-mode]').forEach(button=>button.onclick=()=>startDemo(button.dataset.demoMode));$('#demo-cancel').onclick=cancelDemo;
-  $('#save').onclick=()=>save();$('#discard').onclick=()=>{settings=JSON.parse(baseline);renderAll()};$('#reset').onclick=resetAll;$('#refresh').onclick=load;$('#photo-file').onchange=e=>uploadPhoto(e.target.files[0]);$('#render-selected').onclick=renderSelected;$('#render-stars').onclick=renderStarsNow;$('#demo-stars').onclick=()=>demoState&&demoState.active&&demoState.mode==='star-map'?cancelDemo():startDemo('star-map');
+  $('#save').onclick=()=>save();$('#discard').onclick=()=>{settings=JSON.parse(baseline);renderAll()};$('#reset').onclick=resetAll;$('#refresh').onclick=load;$('#photo-file').onchange=e=>choosePhoto(e.target.files[0]);$('#render-selected').onclick=renderSelected;$('#render-stars').onclick=renderStarsNow;$('#demo-stars').onclick=()=>demoState&&demoState.active&&demoState.mode==='star-map'?cancelDemo():startDemo('star-map');
+  $('#photo-zoom').oninput=()=>{updatePhotoZoom();setDirty()};$('#photo-crop-reset').onclick=resetPhotoCrop;$('#prepare-photo-display').onclick=preparePhotoDisplay;$('#photo-display-end').onclick=endPhotoDisplay;$('#photo-duration').oninput=renderDurationPresets;$$('[data-photo-duration]').forEach(button=>button.onclick=()=>{$('#photo-duration').value=button.dataset.photoDuration;renderDurationPresets()});
+  const photoPreview=$('#photo-preview');photoPreview.onpointerdown=startPhotoDrag;photoPreview.onpointermove=movePhotoDrag;photoPreview.onpointerup=endPhotoDrag;photoPreview.onpointercancel=endPhotoDrag;photoPreview.onlostpointercapture=endPhotoDrag;
   addEventListener('beforeunload',event=>{if(settings&&snapshot()!==baseline){event.preventDefault();event.returnValue=''}});load();
 })();
 """
@@ -717,6 +856,7 @@ class CommittedPreview:
     sunrise_time: str | None
     night_date: str | None
     featured_constellation: str | None
+    recipe_sha256: str | None
 
 
 def _read_regular_file(path: Path, maximum: int) -> bytes:
@@ -772,7 +912,7 @@ def _load_committed_preview(
     output_directory: Path | None,
     mode: str,
 ) -> CommittedPreview:
-    if mode not in ("birds", "star-map"):
+    if mode not in ("birds", "star-map", "uploaded-photo"):
         raise ValueError("Preview mode is not allowed")
     if output_directory is None:
         raise FileNotFoundError("The runtime output directory is not configured")
@@ -815,6 +955,8 @@ def _load_committed_preview(
         or width * height > MAX_IMAGE_PIXELS
     ):
         raise ValueError("Frame manifest has invalid dimensions")
+    if mode == "uploaded-photo" and (width, height) != (1600, 1200):
+        raise ValueError("Photo frame manifest has invalid dimensions")
 
     pixel_checksum = manifest.get("pixel_checksum")
     if not isinstance(pixel_checksum, dict):
@@ -894,6 +1036,15 @@ def _load_committed_preview(
             and featured.isprintable()
         ):
             featured_constellation = featured
+    recipe_sha256: str | None = None
+    if mode == "uploaded-photo":
+        photo = manifest.get("photo")
+        if not isinstance(photo, dict):
+            raise ValueError("Photo frame manifest has no recipe")
+        candidate = photo.get("recipe_sha256")
+        if not isinstance(candidate, str) or _SHA256_RE.fullmatch(candidate) is None:
+            raise ValueError("Photo frame manifest has an invalid recipe")
+        recipe_sha256 = candidate
     return CommittedPreview(
         payload=payload,
         digest=digest,
@@ -904,6 +1055,7 @@ def _load_committed_preview(
         sunrise_time=sunrise_time,
         night_date=night_date,
         featured_constellation=featured_constellation,
+        recipe_sha256=recipe_sha256,
     )
 
 
@@ -1253,7 +1405,13 @@ class ControlHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self.close_connection = True
         path = urlsplit(self.path).path
-        if path not in ("/api/photo", "/api/settings/reset", "/api/render", "/api/demo"):
+        if path not in (
+            "/api/photo",
+            "/api/photo/display",
+            "/api/settings/reset",
+            "/api/render",
+            "/api/demo",
+        ):
             self._error(404, "Not found")
             return
         if path == "/api/settings/reset":
@@ -1304,6 +1462,76 @@ class ControlHandler(BaseHTTPRequestHandler):
                 status = self.server.demo_store.activate(mode)
             except (DemoOverrideError, OSError, RuntimeError, TypeError, ValueError):
                 self._error(503, "The demo override could not be saved")
+                return
+            self._reply(200, _json_bytes(status))
+            return
+        if path == "/api/photo/display":
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                self._error(415, "Expected application/json")
+                return
+            length = self._content_length(4096)
+            if length is None:
+                return
+            try:
+                value = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeError):
+                self._error(400, "Request body is not valid JSON")
+                return
+            if not isinstance(value, dict) or set(value) != {"duration_minutes"}:
+                self._error(422, "Request body must contain only duration_minutes")
+                return
+            duration_minutes = value.get("duration_minutes")
+            minimum_minutes = PHOTO_MIN_DURATION_SECONDS // 60
+            maximum_minutes = PHOTO_MAX_DURATION_SECONDS // 60
+            if (
+                type(duration_minutes) is not int
+                or not minimum_minutes <= duration_minutes <= maximum_minutes
+            ):
+                self._error(
+                    422,
+                    f"duration_minutes must be a whole number from "
+                    f"{minimum_minutes} to {maximum_minutes}",
+                )
+                return
+            if not self.server.photo_path.is_file():
+                self._error(409, "Upload an image before preparing it for display")
+                return
+            try:
+                settings = self.server.store.load()
+                photo_settings = settings.get("photo")
+                if not isinstance(photo_settings, dict) or photo_settings.get("enabled") is not True:
+                    raise ValueError("The uploaded image is not enabled")
+                expected_recipe = photo_recipe_digest(
+                    self.server.photo_path,
+                    photo_settings.get("rotation", 0),
+                    photo_settings.get("caption", ""),
+                    photo_settings.get("crop"),
+                    target_size=(1600, 1200),
+                )
+                committed = _load_committed_preview(
+                    self.server.output_directory,
+                    "uploaded-photo",
+                )
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+                self._error(
+                    409,
+                    "The uploaded image is not ready yet; prepare it again",
+                )
+                return
+            if committed.recipe_sha256 != expected_recipe:
+                self._error(
+                    409,
+                    "The prepared frame does not match the current image settings",
+                )
+                return
+            try:
+                status = self.server.demo_store.activate(
+                    "uploaded-photo",
+                    duration_seconds=duration_minutes * 60,
+                )
+            except (DemoOverrideError, OSError, RuntimeError, TypeError, ValueError):
+                self._error(503, "The timed image display could not be saved")
                 return
             self._reply(200, _json_bytes(status))
             return

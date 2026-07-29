@@ -127,18 +127,31 @@ The Overview page and Stars tab **Five-minute demo** controls select the latest
 committed Weather, Birds, Stars, or uploaded Image artifact; they do not render
 new artwork. The control-panel action writes a fixed-duration UTC sidecar at
 `/var/lib/eink-display/control/demo-override.json`; it does not modify
-`settings.json`, and the browser cannot choose a longer duration. Press the
-ESP32's physical button to see the selection immediately. Expired, absent, or
-malformed transient state is ignored, so the next device request returns to the
-validated saved mode or automatic schedule. This diagnostic selection is
-unrelated to `render --allow-demo` and cannot publish fixture content. While a
-demo is active, its exact expiry preempts the ordinary schedule deadline in the
-device manifest.
+`settings.json`, and these diagnostic controls cannot choose a longer
+duration. Press the matching Weather, Birds, or Stars button to see those
+selections immediately; hold any two buttons together for the Image demo.
+Expired, absent, or malformed transient state is ignored, so the next device
+request returns to the validated saved mode or automatic schedule. This
+diagnostic selection is unrelated to `render --allow-demo` and cannot publish
+fixture content. Its existing five-minute duration, including the Image demo,
+is unchanged.
 
 Photo uploads are EXIF-oriented, color-managed to sRGB, and then converted with
 the photo-only `saturation` and `blue_bias` values under `[photo]` in
 `runtime.toml`. This keeps the stronger blue emphasis used by generated artwork
-from tinting camera-roll images.
+from tinting camera-roll images. The full color-managed upload remains the
+non-destructive source: the 4:3 phone preview stores pan, zoom, and rotation as
+a crop recipe rather than replacing the upload, and the renderer applies an
+optional caption after cropping.
+
+The Photo tab's separate **Prepare & display image** action accepts a duration
+from 30 minutes through 24 hours. It saves the recipe, waits for a successful
+`uploaded-photo` render and atomic commit, verifies that the committed recipe
+still matches the current upload and settings, and only then starts the timed
+lease. Any two distinct ESP32 buttons request the virtual `active` channel; it
+resolves to `uploaded-photo` only while that lease is valid. The lease expiry
+is advertised as the exact `next_wake_at`, suppressing irrelevant automatic
+schedule wakes until the saved manual mode or automatic schedule resumes.
 
 The installed timers render weather at 05:55, birds at 08:55, and tonight's
 star map at noon in the Pi's local timezone, which should match
@@ -251,10 +264,11 @@ The version 1 pull API supports `GET` and `HEAD`:
 
 `active` is a virtual `<mode>` for the current manifest and frame endpoints.
 It resolves on every request from validated phone settings. An unexpired
-five-minute diagnostic override wins temporarily; otherwise a saved manual
-selection maps directly to its concrete artifact and `automatic` uses the
-configured timezone and sunset-aware schedule. Responses include
-`X-Resolved-Mode`.
+five-minute diagnostic override or timed uploaded-photo lease wins temporarily;
+otherwise a saved manual selection maps directly to its concrete artifact and
+`automatic` uses the configured timezone and sunset-aware schedule. A
+two-button image check therefore cannot fetch an expired photo through a
+concrete-mode URL. Responses include `X-Resolved-Mode`.
 Invalid persistent settings or resolver failures receive `503`, invalid or
 expired transient overrides are ignored, and a selected mode with no committed
 artifact receives `404`, so the ESP retains its current image.

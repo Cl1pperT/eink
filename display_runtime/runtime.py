@@ -30,6 +30,10 @@ from display_simulator.sources import (
     UploadedPhotoSource,
     WeatherSource,
 )
+from display_simulator.sources.uploaded_photo import (
+    normalized_photo_crop,
+    photo_recipe_digest,
+)
 
 from .config import RuntimeConfig
 from .ee02 import (
@@ -137,6 +141,23 @@ def _star_view_metadata(options: Mapping[str, Any]) -> dict[str, str]:
     ):
         result["featured_constellation"] = featured
     return result
+
+
+def _photo_manifest_metadata(context: RenderContext) -> dict[str, Any]:
+    """Return the exact input recipe used to prepare an uploaded photo."""
+    crop = normalized_photo_crop(context.options.get("photo_crop"))
+    return {
+        "recipe_sha256": photo_recipe_digest(
+            context.options["photo_path"],
+            int(context.options.get("rotation", 0)),
+            str(context.options.get("caption", "")),
+            crop,
+            target_size=context.orientation.dimensions,
+        ),
+        "rotation": int(context.options.get("rotation", 0)),
+        "caption": str(context.options.get("caption", "")).strip(),
+        "crop": crop,
+    }
 
 
 def _load_control_overlay(
@@ -351,6 +372,7 @@ def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
         "photo_path": _first_value(settings.get("photo_path"), photo.get("path")),
         "photo_caption": _first_value(settings.get("photo_caption"), photo.get("caption")),
         "photo_rotation": _first_value(settings.get("photo_rotation"), photo.get("rotation")),
+        "photo_crop": _first_value(settings.get("photo_crop"), photo.get("crop")),
         "photo_enabled": _first_value(
             settings.get("photo_enabled"),
             photo.get("enabled"),
@@ -642,9 +664,10 @@ class FrameRuntime:
         if not isinstance(selected, str) or selected not in CANONICAL_MODES:
             raise SourcePolicyError("control display.mode is not a valid canonical mode")
         mode = automatic.mode if selected == "automatic" else selected
-        next_wake = automatic.next_wake_at
-        if demo is not None and demo[1] < next_wake:
-            next_wake = demo[1]
+        # A transient override owns the panel until its exact expiry. Automatic
+        # boundaries inside that lease would only wake the radio and reselect
+        # the same image, wasting battery.
+        next_wake = demo[1] if demo is not None else automatic.next_wake_at
         return FrameSelection(
             mode=mode,
             evaluated_at=local.astimezone(timezone.utc),
@@ -815,6 +838,7 @@ class FrameRuntime:
         photo_rotation = control.get("photo_rotation")
         if photo_rotation not in (0, 90, 180, 270):
             photo_rotation = cfg.photo_rotation
+        photo_crop = normalized_photo_crop(control.get("photo_crop"))
         recommendation_count = control.get("recommendation_count")
         if not isinstance(recommendation_count, int) or isinstance(recommendation_count, bool):
             recommendation_count = 5
@@ -898,6 +922,7 @@ class FrameRuntime:
                 "weather_condition": cfg.weather_condition,
                 "rotation": photo_rotation,
                 "caption": photo_caption,
+                "photo_crop": photo_crop,
                 "photo_enabled": control.get("photo_enabled", True) is not False,
                 "settings_label": settings_label,
             },
@@ -935,6 +960,7 @@ class FrameRuntime:
         rgb_path: Path | None,
         mode_directory: Path,
         context: RenderContext,
+        photo_metadata: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         files: dict[str, Any] = {
             "eink_png": {
@@ -1013,6 +1039,10 @@ class FrameRuntime:
             if cardinal is not None:
                 manifest["view"]["direction_cardinal"] = cardinal
             manifest["view"].update(_star_view_metadata(context.options))
+        if mode == "uploaded-photo":
+            if photo_metadata is None:
+                raise RuntimeRenderError("uploaded-photo recipe metadata is unavailable")
+            manifest["photo"] = dict(photo_metadata)
         return manifest
 
     def render(
@@ -1071,6 +1101,18 @@ class FrameRuntime:
             rgb_path = frames_directory / f"{checksum}.rgb.png" if cfg.write_rgb else None
             current = _load_manifest(current_path)
             current_wire_checksum = ((current or {}).get("wire") or {}).get("sha256")
+            target_photo_metadata = (
+                _photo_manifest_metadata(context)
+                if mode == "uploaded-photo"
+                else None
+            )
+            current_photo = _mapping((current or {}).get("photo"))
+            photo_recipe_changed = (
+                mode == "uploaded-photo"
+                and target_photo_metadata is not None
+                and current_photo.get("recipe_sha256")
+                != target_photo_metadata["recipe_sha256"]
+            )
             current_view = (current or {}).get("view") or {}
             current_direction = current_view.get("direction_degrees")
             source_applies_direction = (
@@ -1100,7 +1142,11 @@ class FrameRuntime:
                 wire_path, EE02_PAYLOAD_BYTES, encoded.sha256
             )
             rgb_valid = rgb_path is None or rgb_path.is_file()
-            changed = current_wire_checksum != encoded.sha256 or star_view_changed
+            changed = (
+                current_wire_checksum != encoded.sha256
+                or star_view_changed
+                or photo_recipe_changed
+            )
 
             if not force and not changed and frame_valid and wire_valid and rgb_valid:
                 return RuntimeArtifact(
@@ -1143,6 +1189,7 @@ class FrameRuntime:
                 rgb_path=rgb_path,
                 mode_directory=mode_directory,
                 context=context,
+                photo_metadata=target_photo_metadata,
             )
             _atomic_write_json(manifest, current_path)
             return RuntimeArtifact(

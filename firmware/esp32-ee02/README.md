@@ -87,7 +87,9 @@ The flow is intentionally small:
 
 1. Power-up, reset, firmware upload, the Pi-scheduled timer, or any user button
    wakes the ESP32. Button 1 selects weather, the middle button selects birds,
-   and button 3 selects the star map.
+   and button 3 selects the star map. Pressing any two distinct buttons
+   together asks the Pi's virtual `active` channel whether a timed uploaded
+   image should be shown.
 2. GPIO6 briefly enables the EE02 divider. The firmware takes a median of 25
    calibrated ADC readings on GPIO1, doubles the divider voltage, updates the
    estimate, and switches the divider off.
@@ -106,10 +108,20 @@ The default timer/reset frame channel is `active`. Change `EINK_FRAME_MODE` in
 `include/device_config.h` only if those non-button wakes should follow one
 concrete server frame regardless of the phone-control selection. GPIO 2, 3,
 and 5 are the EE02's active-low user buttons and directly request `weather`,
-`birds`, and `star-map` in that order. A button selection is a one-shot request:
+`birds`, and `star-map` in that order. Any two distinct buttons detected within
+350 milliseconds form an image-check gesture. Hold both until the board begins
+to wake for the most reliable deep-sleep gesture. The image check requests
+`active`, not the concrete photo channel: the Pi returns `uploaded-photo` only
+while the phone-selected duration is valid, so an expired upload cannot be
+resurrected. Repeated contact edges from one button remain a single selection,
+and a second button pressed after the gesture window becomes the newest
+single-button request.
+
+A button selection is a one-shot request:
 the next Pi-advertised schedule boundary returns to `active` and the normal
 automatic/manual web selection. A short press made while the ESP is already
-downloading or refreshing is latched and serviced before sleep.
+downloading or refreshing is latched and serviced before sleep; a two-button
+gesture made then is latched the same way.
 `EINK_CHECK_INTERVAL_SECONDS` is only the default 300-second failure retry.
 The default POSIX timezone is America/Denver
 (`MST7MDT,M3.2.0,M11.1.0`); override `EINK_TIMEZONE` if the frame moves.

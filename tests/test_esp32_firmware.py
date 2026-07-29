@@ -26,6 +26,9 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         cls.battery = (FIRMWARE / "include/battery_monitor.h").read_text(
             encoding="utf-8"
         )
+        cls.button_gesture = (
+            FIRMWARE / "include/button_gesture.h"
+        ).read_text(encoding="utf-8")
         cls.wake_schedule = (FIRMWARE / "include/wake_schedule.h").read_text(
             encoding="utf-8"
         )
@@ -140,23 +143,42 @@ class ESP32FirmwareContractTests(unittest.TestCase):
             ("kButton1FrameMode", "weather"),
             ("kButton2FrameMode", "birds"),
             ("kButton3FrameMode", "star-map"),
+            ("kButtonChordFrameMode", "active"),
         ):
             declaration = f'constexpr char {constant}[] = "{mode}";'
             self.assertIn(declaration, self.source)
+        self.assertIn(
+            "kButtonGestureWindowMilliseconds = 350",
+            self.button_gesture,
+        )
+        self.assertIn("ButtonGestureAction::kImageCheck", self.source)
+        self.assertIn("isButtonChord", self.source)
         self.assertIn("ESP_EXT1_WAKEUP_ANY_LOW", self.source)
         self.assertIn("esp_sleep_get_ext1_wakeup_status()", self.source)
-        self.assertIn("frameModeForButtonWake(wakeStatus)", self.source)
-        self.assertIn("discardWakeButtonLatch(wakeButtonNumber);", self.source)
+        self.assertIn("buttonGestureMaskForWakeStatus(wakeStatus)", self.source)
+        self.assertIn(
+            "discardPendingButtonGesture(wakeGestureMask);", self.source
+        )
         self.assertIn("attachButtonInterrupts();", self.source)
-        self.assertIn("takePendingButton()", self.source)
+        self.assertIn("waitAndTakePendingButtonGesture()", self.source)
+        self.assertNotIn("pendingButtonNumber", self.source)
         attach_at = self.source.index("attachButtonInterrupts();")
+        seed_at = self.source.index(
+            "latchPendingButtonGesture(",
+            attach_at,
+        )
         boot_delay_at = self.source.index("delay(750);")
         self.assertLess(attach_at, boot_delay_at)
+        self.assertLess(seed_at, boot_delay_at)
         final_pending_at = self.source.index(
-            "const uint8_t finalPending = takePendingButton();"
+            "const uint8_t finalPending = waitAndTakePendingButtonGesture();"
         )
         sleep_at = self.source.index("esp_deep_sleep_start();")
         self.assertLess(final_pending_at, sleep_at)
+        self.assertGreaterEqual(
+            self.source.count("waitAndTakePendingButtonGesture();"),
+            3,
+        )
         self.assertIn(
             'Serial.printf("Requesting updated %s manifest',
             self.source,
@@ -302,6 +324,7 @@ class ESP32FirmwareContractTests(unittest.TestCase):
             self.skipTest("a host C++ compiler is not available")
         sources = (
             "esp32_battery_monitor_test.cpp",
+            "esp32_button_gesture_test.cpp",
             "esp32_wake_schedule_test.cpp",
         )
         with tempfile.TemporaryDirectory() as temporary_directory:

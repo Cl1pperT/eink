@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DISPLAY_MODES = (
     "automatic",
     "weather",
@@ -319,6 +319,11 @@ def default_settings(catalog: Catalog) -> dict[str, Any]:
             "caption": "",
             "rotation": 0,
             "enabled": False,
+            "crop": {
+                "center_x": 0.5,
+                "center_y": 0.5,
+                "zoom": 1.0,
+            },
         },
     }
 
@@ -457,9 +462,9 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
     # BirdWeather, and star-map fields from defaults. The next successful save
     # persists the current schema.
     version = data.get("schema_version", 1)
-    if isinstance(version, bool) or version not in (1, 2, SCHEMA_VERSION):
+    if isinstance(version, bool) or version not in (1, 2, 3, SCHEMA_VERSION):
         raise SettingsValidationError(
-            f"Unsupported schema_version {version!r}; expected 1, 2, or {SCHEMA_VERSION}"
+            f"Unsupported schema_version {version!r}; expected 1, 2, 3, or {SCHEMA_VERSION}"
         )
     location_value = data.get("enabled_locations", defaults["enabled_locations"])
     if version == 1 and isinstance(location_value, list):
@@ -566,7 +571,7 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
         )
 
     photo = _expect_mapping(data.get("photo", defaults["photo"]), "photo")
-    _reject_unknown(photo, {"caption", "rotation", "enabled"}, "photo")
+    _reject_unknown(photo, {"caption", "rotation", "enabled", "crop"}, "photo")
     photo_caption = _short_string(
         photo.get("caption", defaults["photo"]["caption"]), "photo.caption", 200
     )
@@ -576,6 +581,26 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
     photo_enabled = photo.get("enabled", defaults["photo"]["enabled"])
     if not isinstance(photo_enabled, bool):
         raise SettingsValidationError("photo.enabled must be true or false")
+    crop = _expect_mapping(photo.get("crop", defaults["photo"]["crop"]), "photo.crop")
+    _reject_unknown(crop, {"center_x", "center_y", "zoom"}, "photo.crop")
+    center_x = _finite_number(
+        crop.get("center_x", defaults["photo"]["crop"]["center_x"]),
+        "photo.crop.center_x",
+    )
+    center_y = _finite_number(
+        crop.get("center_y", defaults["photo"]["crop"]["center_y"]),
+        "photo.crop.center_y",
+    )
+    zoom = _finite_number(
+        crop.get("zoom", defaults["photo"]["crop"]["zoom"]),
+        "photo.crop.zoom",
+    )
+    if not 0 <= center_x <= 1:
+        raise SettingsValidationError("photo.crop.center_x must be from 0 to 1")
+    if not 0 <= center_y <= 1:
+        raise SettingsValidationError("photo.crop.center_y must be from 0 to 1")
+    if not 1 <= zoom <= 8:
+        raise SettingsValidationError("photo.crop.zoom must be from 1 to 8")
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -605,6 +630,11 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
             "caption": photo_caption,
             "rotation": int(rotation),
             "enabled": photo_enabled,
+            "crop": {
+                "center_x": float(center_x),
+                "center_y": float(center_y),
+                "zoom": float(zoom),
+            },
         },
     }
 

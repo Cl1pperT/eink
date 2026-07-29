@@ -117,10 +117,24 @@ valid save wins, so refresh before making another change. Do not forward port
 The Overview page and Stars tab also provide a diagnostic **Five-minute demo**
 for Weather, Birds, Stars, or the uploaded Image. It selects the latest
 committed artwork without rendering or changing the saved display mode. Press
-the frame's physical button to fetch it immediately. At expiry, the next button
-press or advertised demo-expiry wake resumes the saved manual mode or automatic
-schedule. This override never enables fixture/demo artwork; it only selects an
-already committed production frame.
+the corresponding Weather, Birds, or Stars button to fetch those modes
+immediately; for the Image demo, hold any two buttons together. At expiry, the
+next button press or advertised demo-expiry wake resumes the saved manual mode
+or automatic schedule. This override never enables fixture/demo artwork; it
+only selects an already committed production frame.
+
+The Photo tab has a separate timed-image workflow. Choose any duration from 30
+minutes through 24 hours, then select **Prepare & display image**. The site
+saves the crop recipe, renders and verifies a fresh committed frame, and starts
+the duration only after that render succeeds. Its 4:3 preview supports
+drag-to-pan, zoom, and rotation without destructively cropping the preserved
+color-managed upload; an optional caption is applied after the crop. Hold any
+two distinct ESP32 buttons together to request the Pi's virtual `active`
+channel. It resolves to the uploaded photo only while that timed lease remains
+valid, so an absent or expired lease cannot resurrect an old image. The lease's
+exact expiry is the ESP32's next wake, after which the saved manual selection
+or automatic schedule resumes. The existing five-minute Image demo remains
+available and unchanged.
 
 BirdWeather is a regional view of reports from nearby stations. Without a
 microphone attached to this frame it intentionally does not describe those
