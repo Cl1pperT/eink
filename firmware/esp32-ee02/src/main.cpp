@@ -16,6 +16,7 @@
 #include "battery_monitor.h"
 #include "device_config.h"
 #include "frame_contract.h"
+#include "wake_schedule.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -48,13 +49,15 @@ static_assert(EINK_CHECK_INTERVAL_SECONDS > 0,
 static_assert(EINK_BATTERY_SAMPLE_COUNT >= 3 &&
                   EINK_BATTERY_SAMPLE_COUNT % 2 == 1,
               "EINK_BATTERY_SAMPLE_COUNT must be odd and at least three");
-static_assert(EINK_BATTERY_SAMPLE_HOUR >= 0 &&
-                  EINK_BATTERY_SAMPLE_HOUR <= 23,
-              "EINK_BATTERY_SAMPLE_HOUR must be a valid local hour");
 static_assert(EINK_BATTERY_DIVIDER_MULTIPLIER > 0,
               "EINK_BATTERY_DIVIDER_MULTIPLIER must be positive");
 static_assert(EINK_NTP_RETRY_WAKES > 0,
               "EINK_NTP_RETRY_WAKES must be positive");
+static_assert(EINK_MAX_SCHEDULE_SLEEP_SECONDS >=
+                  EINK_CHECK_INTERVAL_SECONDS,
+              "schedule sleep bound must permit the fallback interval");
+static_assert(EINK_MAX_MANIFEST_BYTES > 0,
+              "manifest size bound must be positive");
 
 namespace {
 
@@ -66,8 +69,6 @@ constexpr char kPreferenceValid[] = "state-valid";
 constexpr char kPreferenceBatteryValid[] = "bat-valid";
 constexpr char kPreferenceBatteryMillivolts[] = "bat-mv";
 constexpr char kPreferenceBatteryPercent[] = "bat-pct";
-constexpr char kPreferenceBatteryDay[] = "bat-day";
-constexpr char kPreferenceBatteryAttemptDay[] = "bat-try";
 constexpr char kPreferenceClockDay[] = "clock-day";
 constexpr char kPreferenceClockAttemptDay[] = "clock-try";
 constexpr char kPreferenceMarkValid[] = "mark-valid";
@@ -97,24 +98,24 @@ bool preferencesReady = false;
 String displayedMode;
 String displayedSha;
 String displayedEtag;
+String resolvedServerBase;
 bool panelInitialized = false;
 
 struct BatteryState {
   bool valid = false;
   uint16_t millivolts = 0;
   uint8_t percent = 0;
-  uint32_t sampledLocalDay = 0;
 };
 
 BatteryState battery;
-uint32_t batteryAttemptedLocalDay = 0;
 bool displayedBatteryMarkValid = false;
 uint8_t displayedBatteryPercent = 0;
 uint32_t clockSyncedLocalDay = 0;
 uint32_t clockAttemptedLocalDay = 0;
 bool wifiAttemptedThisWake = false;
 RTC_DATA_ATTR uint16_t ntpRetryWakesRemaining = 0;
-RTC_DATA_ATTR bool initialBatteryAttempted = false;
+eink::WakeDeadline scheduledWake;
+volatile uint8_t pendingButtonNumber = 0;
 
 enum class SyncResult {
   kUpdated,
@@ -269,8 +270,6 @@ void loadBatteryState() {
       preferences.getUInt(kPreferenceClockAttemptDay, 0);
   const uint16_t persistedMillivolts =
       preferences.getUShort(kPreferenceBatteryMillivolts, 0);
-  batteryAttemptedLocalDay =
-      preferences.getUInt(kPreferenceBatteryAttemptDay, 0);
   const uint8_t persistedPercent =
       preferences.getUChar(kPreferenceBatteryPercent, 0);
   const bool persistedBatteryIsValid =
@@ -285,8 +284,6 @@ void loadBatteryState() {
   battery.valid = true;
   battery.millivolts = persistedMillivolts;
   battery.percent = persistedPercent;
-  battery.sampledLocalDay =
-      preferences.getUInt(kPreferenceBatteryDay, 0);
   Serial.printf("Cached battery estimate: %u/100 (%u mV)\n",
                 static_cast<unsigned>(battery.percent),
                 static_cast<unsigned>(battery.millivolts));
@@ -297,9 +294,8 @@ bool persistBatteryState() {
     return false;
   }
 
-  // Battery sampling and physical display commits are intentionally separate.
-  // A failed frame pull must retry the cached percentage without re-reading
-  // the ADC, while state-valid below separately describes physical pixels.
+  // Battery sampling and physical display commits are intentionally separate,
+  // so a failed frame pull retains the fresh estimate for the next wake.
   const bool invalidated =
       preferences.putBool(kPreferenceBatteryValid, false) > 0 &&
       !preferences.getBool(kPreferenceBatteryValid, true);
@@ -308,17 +304,12 @@ bool persistBatteryState() {
                             battery.millivolts) > 0;
   const bool percentSaved =
       preferences.putUChar(kPreferenceBatteryPercent, battery.percent) > 0;
-  const bool daySaved =
-      preferences.putUInt(kPreferenceBatteryDay,
-                          battery.sampledLocalDay) > 0;
   const bool fieldsMatch =
-      voltageSaved && percentSaved && daySaved &&
+      voltageSaved && percentSaved &&
       preferences.getUShort(kPreferenceBatteryMillivolts, 0) ==
           battery.millivolts &&
       preferences.getUChar(kPreferenceBatteryPercent, 255) ==
-          battery.percent &&
-      preferences.getUInt(kPreferenceBatteryDay, UINT32_MAX) ==
-          battery.sampledLocalDay;
+          battery.percent;
   const bool committed =
       invalidated && fieldsMatch &&
       preferences.putBool(kPreferenceBatteryValid, true) > 0 &&
@@ -374,41 +365,9 @@ bool readBatteryMillivolts(uint16_t &batteryMillivolts) {
   return true;
 }
 
-void persistBatteryAttemptDay() {
-  if (!preferencesReady || batteryAttemptedLocalDay == 0) {
-    return;
-  }
-  const bool saved =
-      preferences.putUInt(kPreferenceBatteryAttemptDay,
-                          batteryAttemptedLocalDay) > 0 &&
-      preferences.getUInt(kPreferenceBatteryAttemptDay, 0) ==
-          batteryAttemptedLocalDay;
-  if (!saved) {
-    Serial.println("Warning: battery attempt date was not persisted");
-  }
-}
-
-void sampleBatteryIfDue(const struct tm *localClock) {
-  const bool hasLocalDay = localClock != nullptr;
-  const bool isDailyWindow =
-      hasLocalDay && localClock->tm_hour >= EINK_BATTERY_SAMPLE_HOUR;
-  const uint32_t today =
-      hasLocalDay ? localDayKey(*localClock) : 0;
-  const eink::BatterySampleDecision decision =
-      eink::decideBatterySample(
-          hasLocalDay, hasLocalDay ? localClock->tm_hour : 0, today,
-          batteryAttemptedLocalDay, battery.valid,
-          initialBatteryAttempted, EINK_BATTERY_SAMPLE_HOUR);
-  if (!decision.due) {
-    return;
-  }
-
-  initialBatteryAttempted = true;
-  if (decision.daily) {
-    batteryAttemptedLocalDay = today;
-    persistBatteryAttemptDay();
-  }
-
+void sampleBatteryEveryWake() {
+  const bool hadEstimate = battery.valid;
+  const uint8_t previousPercent = battery.percent;
   uint16_t measuredMillivolts = 0;
   if (!readBatteryMillivolts(measuredMillivolts)) {
     return;
@@ -416,12 +375,8 @@ void sampleBatteryIfDue(const struct tm *localClock) {
 
   battery.valid = true;
   battery.millivolts = measuredMillivolts;
-  battery.percent = eink::estimateBatteryPercent(measuredMillivolts);
-  // A first-boot estimate before 06:00 is immediately useful, but day zero
-  // ensures the normal 06:00 reading still happens on that local date.
-  if (decision.daily) {
-    battery.sampledLocalDay = today;
-  }
+  battery.percent = eink::stabilizeBatteryPercent(
+      measuredMillivolts, hadEstimate, previousPercent);
   persistBatteryState();
   Serial.printf("Battery estimate sampled: %u/100 (%u mV)\n",
                 static_cast<unsigned>(battery.percent),
@@ -633,7 +588,10 @@ bool synchronizeClockIfDue(struct tm &localClock) {
   return true;
 }
 
-String frameUrl(const String &mode) {
+String serverBaseUrl() {
+  if (resolvedServerBase.length() > 0) {
+    return resolvedServerBase;
+  }
   String base(EINK_FRAME_SERVER_URL);
   while (base.endsWith("/")) {
     base.remove(base.length() - 1);
@@ -661,10 +619,24 @@ String frameUrl(const String &mode) {
     Serial.printf("Resolved %s to %s\n", hostname.c_str(),
                   address.toString().c_str());
   }
-  return base + "/v1/frame/" + mode;
+  resolvedServerBase = base;
+  return resolvedServerBase;
 }
 
-bool readExactFrame(HTTPClient &http, uint8_t *destination) {
+String manifestUrl(const String &mode) {
+  const String base = serverBaseUrl();
+  return base.length() > 0 ? base + "/v1/manifest/" + mode : String();
+}
+
+String immutableFrameUrl(const String &mode, const String &sha) {
+  const String base = serverBaseUrl();
+  return base.length() > 0
+             ? base + "/v1/frame/" + mode + "/" + sha
+             : String();
+}
+
+bool readExactPayload(HTTPClient &http, uint8_t *destination,
+                      size_t expectedBytes) {
   auto *stream = http.getStreamPtr();
   if (stream == nullptr) {
     return false;
@@ -672,11 +644,11 @@ bool readExactFrame(HTTPClient &http, uint8_t *destination) {
 
   size_t offset = 0;
   uint32_t lastProgress = millis();
-  while (offset < eink::kFrameBytes) {
+  while (offset < expectedBytes) {
     const int available = stream->available();
     if (available > 0) {
       const size_t wanted =
-          min(static_cast<size_t>(available), eink::kFrameBytes - offset);
+          min(static_cast<size_t>(available), expectedBytes - offset);
       const size_t received = stream->readBytes(destination + offset, wanted);
       if (received == 0) {
         return false;
@@ -695,7 +667,7 @@ bool readExactFrame(HTTPClient &http, uint8_t *destination) {
     }
     delay(1);
   }
-  return offset == eink::kFrameBytes;
+  return offset == expectedBytes;
 }
 
 uint8_t backingColorAtLogical(const uint8_t *frame, int16_t logicalX,
@@ -788,87 +760,206 @@ bool refreshPanel(const uint8_t *verifiedFrame) {
   return true;
 }
 
-SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
-  if (!eink::isFrameChannel(mode)) {
-    Serial.println("Refusing an unsupported frame mode");
-    return SyncResult::kFailed;
-  }
-  if (batteryMarkNeedsRefresh()) {
-    bypassValidator = true;
-  }
-  if (!connectWifi()) {
-    return SyncResult::kFailed;
-  }
+struct ManifestInfo {
+  String mode;
+  String frameSha;
+  String frameEtag;
+  eink::WakeDeadline wake;
+};
 
-  WiFiClient transport;
-  HTTPClient http;
+void configureHttp(HTTPClient &http) {
   http.setConnectTimeout(EINK_HTTP_CONNECT_TIMEOUT_MS);
   http.setTimeout(EINK_HTTP_READ_TIMEOUT_MS);
   http.useHTTP10(true);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+}
 
-  const char *headerNames[] = {
-      "ETag",          "Content-Type",       "X-Frame-Format",
-      "X-Frame-SHA256", "X-Content-SHA256",
-  };
-  http.collectHeaders(headerNames,
-                      sizeof(headerNames) / sizeof(headerNames[0]));
-
-  const String url = frameUrl(mode);
-  if (url.length() == 0) {
-    return SyncResult::kFailed;
-  }
-  if (!http.begin(transport, url)) {
-    Serial.println("Could not initialize the HTTP request");
-    return SyncResult::kFailed;
-  }
+void addAuthorization(HTTPClient &http) {
   if (EINK_FRAME_AUTH_TOKEN[0] != '\0') {
     http.addHeader("Authorization",
                    String("Bearer ") + EINK_FRAME_AUTH_TOKEN);
   }
-  http.addHeader("Accept", eink::kContentType);
+}
+
+bool jsonStringFieldEquals(const char *document, const char *key,
+                           const String &expected) {
+  if (document == nullptr || key == nullptr) {
+    return false;
+  }
+  const String marker = String("\"") + key + "\"";
+  const char *cursor = strstr(document, marker.c_str());
+  if (cursor == nullptr) {
+    return false;
+  }
+  cursor += marker.length();
+  while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
+         *cursor == '\n') {
+    ++cursor;
+  }
+  if (*cursor++ != ':') {
+    return false;
+  }
+  while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
+         *cursor == '\n') {
+    ++cursor;
+  }
+  if (*cursor++ != '"') {
+    return false;
+  }
+  return strncmp(cursor, expected.c_str(), expected.length()) == 0 &&
+         cursor[expected.length()] == '"';
+}
+
+bool fetchManifest(const String &requestedMode, ManifestInfo &manifest) {
+  WiFiClient transport;
+  HTTPClient http;
+  configureHttp(http);
+  const char *headerNames[] = {
+      "ETag",              "Content-Type",      "X-Frame-ETag",
+      "X-Frame-Format",    "X-Frame-SHA256",   "X-Content-SHA256",
+      "X-Resolved-Mode",   "X-Server-Time",     "X-Next-Wake-At",
+      "X-Server-Epoch",    "X-Next-Wake-Epoch",
+  };
+  http.collectHeaders(headerNames,
+                      sizeof(headerNames) / sizeof(headerNames[0]));
+
+  const String url = manifestUrl(requestedMode);
+  if (url.length() == 0 || !http.begin(transport, url)) {
+    Serial.println("Could not initialize the manifest request");
+    return false;
+  }
+  addAuthorization(http);
+  http.addHeader("Accept", "application/json");
   http.addHeader("Accept-Encoding", "identity");
-  if (!bypassValidator && isLowercaseSha256(displayedSha) &&
-      displayedEtag == etagForSha(displayedSha)) {
-    http.addHeader("If-None-Match", displayedEtag);
+
+  // This GET is deliberately unconditional on every timer and button wake.
+  // The response is small and is the Pi's authoritative schedule decision.
+  Serial.printf("Requesting updated %s manifest\n", requestedMode.c_str());
+  const int status = http.GET();
+  if (status != HTTP_CODE_OK) {
+    Serial.printf("Manifest server returned HTTP %d\n", status);
+    http.end();
+    return false;
   }
 
-  Serial.printf("Checking %s frame\n", mode.c_str());
-  const int status = http.GET();
-  if (status == HTTP_CODE_NOT_MODIFIED) {
-    String responseEtag = http.header("ETag");
-    String responseSha = http.header("X-Frame-SHA256");
-    String responseContentSha = http.header("X-Content-SHA256");
-    String responseFormat = http.header("X-Frame-Format");
-    responseEtag.trim();
-    responseSha.trim();
-    responseContentSha.trim();
-    responseFormat.trim();
-    const bool validNotModified = !bypassValidator &&
-                                  isLowercaseSha256(displayedSha) &&
-                                  responseEtag == displayedEtag &&
-                                  responseSha == displayedSha &&
-                                  responseContentSha == displayedSha &&
-                                  responseFormat == eink::kWireFormat;
-    http.end();
-    if (!validNotModified) {
-      Serial.println("Invalid 304 response; retrying once without a validator");
-      if (!bypassValidator) {
-        return syncFrame(mode, true);
-      }
-      return SyncResult::kFailed;
-    }
-    if (displayedMode != mode) {
-      persistModeForUnchangedFrame(mode);
-    }
-    Serial.println("Frame is unchanged; skipping the slow e-paper refresh");
-    return SyncResult::kNotModified;
+  String contentType = http.header("Content-Type");
+  String manifestEtag = http.header("ETag");
+  String frameEtag = http.header("X-Frame-ETag");
+  String wireFormat = http.header("X-Frame-Format");
+  String frameSha = http.header("X-Frame-SHA256");
+  String contentSha = http.header("X-Content-SHA256");
+  String resolvedMode = http.header("X-Resolved-Mode");
+  String serverTime = http.header("X-Server-Time");
+  String nextWakeAt = http.header("X-Next-Wake-At");
+  String serverEpochText = http.header("X-Server-Epoch");
+  String nextWakeEpochText = http.header("X-Next-Wake-Epoch");
+  for (String *value :
+       {&contentType, &manifestEtag, &frameEtag, &wireFormat, &frameSha,
+        &contentSha, &resolvedMode, &serverTime, &nextWakeAt,
+        &serverEpochText, &nextWakeEpochText}) {
+    value->trim();
   }
+  if (requestedMode != "active") {
+    resolvedMode = requestedMode;
+  }
+
+  const int contentLength = http.getSize();
+  const bool validHeaders =
+      contentLength > 0 &&
+      contentLength <= static_cast<int>(EINK_MAX_MANIFEST_BYTES) &&
+      contentType == "application/json; charset=utf-8" &&
+      eink::isConcreteFrameMode(resolvedMode) &&
+      isLowercaseSha256(frameSha) && contentSha == frameSha &&
+      frameEtag == etagForSha(frameSha) &&
+      wireFormat == eink::kWireFormat;
+  if (!validHeaders) {
+    Serial.println("Manifest response headers are invalid");
+    http.end();
+    return false;
+  }
+
+  auto *document = static_cast<uint8_t *>(heap_caps_malloc(
+      static_cast<size_t>(contentLength) + 1,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (document == nullptr) {
+    Serial.println("Could not allocate the manifest staging buffer");
+    http.end();
+    return false;
+  }
+  const bool complete =
+      readExactPayload(http, document, static_cast<size_t>(contentLength));
+  http.end();
+  document[contentLength] = '\0';
+  if (!complete) {
+    Serial.println("Manifest response was truncated");
+    heap_caps_free(document);
+    return false;
+  }
+
+  const String actualManifestSha =
+      sha256Hex(document, static_cast<size_t>(contentLength));
+  const bool validDocument =
+      manifestEtag == etagForSha(actualManifestSha) &&
+      jsonStringFieldEquals(reinterpret_cast<const char *>(document), "mode",
+                            resolvedMode);
+  if (!validDocument) {
+    Serial.println("Manifest body failed validation");
+    heap_caps_free(document);
+    return false;
+  }
+
+  uint64_t serverEpoch = 0;
+  uint64_t nextWakeEpoch = 0;
+  const bool completeSchedule =
+      serverTime.length() > 0 && nextWakeAt.length() > 0 &&
+      eink::parseUnsignedEpoch(serverEpochText.c_str(), serverEpoch) &&
+      eink::parseUnsignedEpoch(nextWakeEpochText.c_str(), nextWakeEpoch) &&
+      jsonStringFieldEquals(reinterpret_cast<const char *>(document),
+                            "next_wake_at", nextWakeAt);
+  heap_caps_free(document);
+
+  manifest.mode = resolvedMode;
+  manifest.frameSha = frameSha;
+  manifest.frameEtag = frameEtag;
+  if (completeSchedule) {
+    manifest.wake = eink::makeWakeDeadline(
+        serverEpoch, nextWakeEpoch, millis(),
+        EINK_MAX_SCHEDULE_SLEEP_SECONDS);
+  }
+  if (manifest.wake.valid) {
+    Serial.printf("Pi scheduled the next wake for %s\n", nextWakeAt.c_str());
+  } else {
+    Serial.println(
+        "Manifest has no valid future deadline; using the short retry interval");
+  }
+  return true;
+}
+
+uint8_t *downloadFrame(const ManifestInfo &manifest) {
+  WiFiClient transport;
+  HTTPClient http;
+  configureHttp(http);
+  const char *headerNames[] = {
+      "ETag", "Content-Type", "X-Frame-Format", "X-Frame-SHA256",
+      "X-Content-SHA256",
+  };
+  http.collectHeaders(headerNames,
+                      sizeof(headerNames) / sizeof(headerNames[0]));
+
+  const String url = immutableFrameUrl(manifest.mode, manifest.frameSha);
+  if (url.length() == 0 || !http.begin(transport, url)) {
+    Serial.println("Could not initialize the frame request");
+    return nullptr;
+  }
+  addAuthorization(http);
+  http.addHeader("Accept", eink::kContentType);
+  http.addHeader("Accept-Encoding", "identity");
+  const int status = http.GET();
   if (status != HTTP_CODE_OK) {
     Serial.printf("Frame server returned HTTP %d; panel left unchanged\n",
                   status);
     http.end();
-    return SyncResult::kFailed;
+    return nullptr;
   }
 
   String contentType = http.header("Content-Type");
@@ -876,21 +967,20 @@ SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
   String expectedSha = http.header("X-Frame-SHA256");
   String contentSha = http.header("X-Content-SHA256");
   String etag = http.header("ETag");
-  contentType.trim();
-  wireFormat.trim();
-  expectedSha.trim();
-  contentSha.trim();
-  etag.trim();
-
+  for (String *value :
+       {&contentType, &wireFormat, &expectedSha, &contentSha, &etag}) {
+    value->trim();
+  }
   const bool validHeaders =
       http.getSize() == static_cast<int>(eink::kFrameBytes) &&
-      contentType == eink::kContentType && wireFormat == eink::kWireFormat &&
-      isLowercaseSha256(expectedSha) && contentSha == expectedSha &&
-      etag == etagForSha(expectedSha);
+      contentType == eink::kContentType &&
+      wireFormat == eink::kWireFormat &&
+      expectedSha == manifest.frameSha && contentSha == expectedSha &&
+      etag == manifest.frameEtag;
   if (!validHeaders) {
     Serial.println("Frame response contract is invalid; panel left unchanged");
     http.end();
-    return SyncResult::kFailed;
+    return nullptr;
   }
 
   auto *staging = static_cast<uint8_t *>(heap_caps_malloc(
@@ -898,48 +988,77 @@ SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
   if (staging == nullptr) {
     Serial.println("Could not allocate the 960,000-byte PSRAM staging buffer");
     http.end();
-    return SyncResult::kFailed;
+    return nullptr;
   }
-
-  const bool complete = readExactFrame(http, staging);
+  const bool complete =
+      readExactPayload(http, staging, eink::kFrameBytes);
   http.end();
   if (!complete) {
     Serial.println("Frame response was truncated; panel left unchanged");
     heap_caps_free(staging);
-    return SyncResult::kFailed;
+    return nullptr;
   }
-
   const String actualSha = sha256Hex(staging, eink::kFrameBytes);
-  if (actualSha != expectedSha) {
+  if (actualSha != manifest.frameSha) {
     Serial.println("Frame SHA-256 mismatch; panel left unchanged");
     heap_caps_free(staging);
-    return SyncResult::kFailed;
+    return nullptr;
   }
   if (!eink::hasOnlySupportedColors(staging, eink::kFrameBytes)) {
     Serial.println("Frame contains unsupported EE02 color nibbles");
     heap_caps_free(staging);
+    return nullptr;
+  }
+  return staging;
+}
+
+SyncResult syncFrame(const String &requestedMode) {
+  scheduledWake = {};
+  if (!eink::isFrameChannel(requestedMode)) {
+    Serial.println("Refusing an unsupported frame mode");
+    return SyncResult::kFailed;
+  }
+  if (!connectWifi()) {
     return SyncResult::kFailed;
   }
 
-  // A compliant server returns 304 for this case. This second guard also
-  // prevents a redundant physical refresh behind a proxy that returned 200.
-  if (actualSha == displayedSha && etag == displayedEtag &&
+  ManifestInfo manifest;
+  if (!fetchManifest(requestedMode, manifest)) {
+    return SyncResult::kFailed;
+  }
+  const bool baseMatches =
+      manifest.frameSha == displayedSha &&
+      manifest.frameEtag == displayedEtag;
+  if (baseMatches && !batteryMarkNeedsRefresh()) {
+    if (displayedMode != manifest.mode) {
+      persistModeForUnchangedFrame(manifest.mode);
+    }
+    scheduledWake = manifest.wake;
+    Serial.println(
+        "Manifest frame is unchanged; skipping the large download and refresh");
+    return SyncResult::kNotModified;
+  }
+
+  uint8_t *staging = downloadFrame(manifest);
+  if (staging == nullptr) {
+    return SyncResult::kFailed;
+  }
+  if (manifest.frameSha == displayedSha &&
+      manifest.frameEtag == displayedEtag &&
       !batteryMarkNeedsRefresh()) {
     heap_caps_free(staging);
-    if (displayedMode != mode) {
-      persistModeForUnchangedFrame(mode);
+    if (displayedMode != manifest.mode) {
+      persistModeForUnchangedFrame(manifest.mode);
     }
+    scheduledWake = manifest.wake;
     Serial.println("Downloaded frame matches the display; refresh skipped");
     return SyncResult::kNotModified;
   }
 
-  // Invalidate the old persisted checksum before touching physical pixels.
-  // This closes the power-loss window between epaper.update() and NVS writes.
   if (!invalidatePersistedDisplayState()) {
     heap_caps_free(staging);
     return SyncResult::kFailed;
   }
-
   Serial.println("Frame verified; starting the e-paper refresh");
   const bool refreshed = refreshPanel(staging);
   heap_caps_free(staging);
@@ -948,9 +1067,11 @@ SyncResult syncFrame(const String &mode, bool bypassValidator = false) {
     return SyncResult::kFailed;
   }
 
-  persistDisplayState(mode, actualSha, etag);
-  Serial.printf("Displayed %s frame %s\n", mode.c_str(),
-                actualSha.substring(0, 12).c_str());
+  persistDisplayState(
+      manifest.mode, manifest.frameSha, manifest.frameEtag);
+  scheduledWake = manifest.wake;
+  Serial.printf("Displayed %s frame %s\n", manifest.mode.c_str(),
+                manifest.frameSha.substring(0, 12).c_str());
   return SyncResult::kUpdated;
 }
 
@@ -959,75 +1080,139 @@ bool anyButtonIsPressed() {
          digitalRead(kButton3) == LOW;
 }
 
-const char *frameModeForButtonWake(uint64_t wakeStatus) {
-  // Give the numbered buttons deterministic priority if more than one is
-  // pressed at the same time. EXT1 retains this mask across deep sleep, so the
-  // selection remains reliable even when the user releases the button before
-  // setup reaches this function.
-  if ((wakeStatus & (1ULL << kButton1)) != 0) {
+const char *frameModeForButtonNumber(uint8_t buttonNumber) {
+  if (buttonNumber == 1) {
     return kButton1FrameMode;
   }
-  if ((wakeStatus & (1ULL << kButton2)) != 0) {
+  if (buttonNumber == 2) {
     return kButton2FrameMode;
   }
-  if ((wakeStatus & (1ULL << kButton3)) != 0) {
+  if (buttonNumber == 3) {
     return kButton3FrameMode;
   }
   return nullptr;
 }
 
-uint64_t nextTimerWakeSeconds() {
-  uint64_t wakeSeconds = EINK_CHECK_INTERVAL_SECONDS;
-  struct tm localClock {};
-  if (!readLocalClock(localClock) ||
-      batteryAttemptedLocalDay == localDayKey(localClock) ||
-      localClock.tm_hour >= EINK_BATTERY_SAMPLE_HOUR) {
-    return wakeSeconds;
+uint8_t buttonNumberForWakeStatus(uint64_t wakeStatus) {
+  // Give the numbered buttons deterministic priority if more than one is
+  // pressed at the same time. EXT1 retains this mask across deep sleep, so the
+  // selection remains reliable even when the user releases the button before
+  // setup reaches this function.
+  if ((wakeStatus & (1ULL << kButton1)) != 0) {
+    return 1;
   }
+  if ((wakeStatus & (1ULL << kButton2)) != 0) {
+    return 2;
+  }
+  if ((wakeStatus & (1ULL << kButton3)) != 0) {
+    return 3;
+  }
+  return 0;
+}
 
-  struct tm target = localClock;
-  target.tm_hour = EINK_BATTERY_SAMPLE_HOUR;
-  target.tm_min = 0;
-  target.tm_sec = 0;
-  target.tm_isdst = -1;
-  const time_t targetTime = mktime(&target);
-  const time_t now = time(nullptr);
-  if (targetTime <= now) {
-    return wakeSeconds;
+const char *frameModeForButtonWake(uint64_t wakeStatus) {
+  return frameModeForButtonNumber(buttonNumberForWakeStatus(wakeStatus));
+}
+
+void discardWakeButtonLatch(uint8_t wakeButtonNumber) {
+  if (wakeButtonNumber == 0) {
+    return;
   }
-  const uint64_t untilTarget =
-      static_cast<uint64_t>(targetTime - now);
-  if (untilTarget > 0 && untilTarget < wakeSeconds) {
-    wakeSeconds = untilTarget;
+  noInterrupts();
+  if (pendingButtonNumber == wakeButtonNumber) {
+    pendingButtonNumber = 0;
   }
-  return wakeSeconds;
+  interrupts();
+}
+
+void IRAM_ATTR onButton1Pressed() {
+  pendingButtonNumber = 1;
+}
+
+void IRAM_ATTR onButton2Pressed() {
+  pendingButtonNumber = 2;
+}
+
+void IRAM_ATTR onButton3Pressed() {
+  pendingButtonNumber = 3;
+}
+
+uint8_t takePendingButton() {
+  noInterrupts();
+  const uint8_t buttonNumber = pendingButtonNumber;
+  pendingButtonNumber = 0;
+  interrupts();
+  return buttonNumber;
+}
+
+void attachButtonInterrupts() {
+  // Deep-sleep EXT1 handles the usual idle case. Attach these latches as soon
+  // as the pins are configured so a short press made during boot, Wi-Fi,
+  // download, panel refresh, or shutdown work is preserved. HTTP work never
+  // runs inside the ISR.
+  attachInterrupt(digitalPinToInterrupt(kButton1), onButton1Pressed, FALLING);
+  attachInterrupt(digitalPinToInterrupt(kButton2), onButton2Pressed, FALLING);
+  attachInterrupt(digitalPinToInterrupt(kButton3), onButton3Pressed, FALLING);
+}
+
+uint64_t nextTimerWakeSeconds() {
+  return eink::remainingWakeSeconds(
+      scheduledWake, millis(), EINK_CHECK_INTERVAL_SECONDS);
 }
 
 void sleepUntilButton() {
-  const uint64_t timerWakeSeconds = nextTimerWakeSeconds();
-  MDNS.end();
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  digitalWrite(kBatteryEnablePin, LOW);
-  if (preferencesReady) {
-    preferences.end();
-    preferencesReady = false;
-  }
+  while (true) {
+    while (anyButtonIsPressed()) {
+      delay(10);
+    }
+    const uint8_t pending = takePendingButton();
+    const char *pendingMode = frameModeForButtonNumber(pending);
+    if (pendingMode != nullptr) {
+      Serial.printf(
+          "Button %u was pressed while awake; requesting %s manifest\n",
+          static_cast<unsigned>(pending), pendingMode);
+      sampleBatteryEveryWake();
+      wifiAttemptedThisWake = false;
+      syncFrame(pendingMode);
+      continue;
+    }
 
-  // A held active-low button would wake the ESP32 immediately. Wait for the
-  // press that started this run to be released before arming the next wake.
-  while (anyButtonIsPressed()) {
-    delay(10);
-  }
+    const uint64_t timerWakeSeconds = nextTimerWakeSeconds();
+    MDNS.end();
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    digitalWrite(kBatteryEnablePin, LOW);
 
-  esp_sleep_enable_ext1_wakeup(kButtonWakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
-  esp_sleep_enable_timer_wakeup(timerWakeSeconds * 1000000ULL);
-  Serial.printf(
-      "Sleeping; checking again in %llu seconds or on any user button\n",
-      timerWakeSeconds);
-  Serial.flush();
-  delay(20);
-  esp_deep_sleep_start();
+    esp_sleep_enable_ext1_wakeup(kButtonWakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
+    esp_sleep_enable_timer_wakeup(timerWakeSeconds * 1000000ULL);
+    Serial.printf(
+        "Sleeping; checking again in %llu seconds or on any user button\n",
+        timerWakeSeconds);
+    Serial.flush();
+    delay(20);
+
+    // Check once more after radio shutdown and serial flushing. A press held
+    // here is released before servicing so it cannot immediately retrigger
+    // EXT1; a short released press remains latched by the ISR.
+    while (anyButtonIsPressed()) {
+      delay(10);
+    }
+    const uint8_t finalPending = takePendingButton();
+    const char *finalMode = frameModeForButtonNumber(finalPending);
+    if (finalMode != nullptr) {
+      Serial.printf(
+          "Button %u was pressed before sleep; requesting %s manifest\n",
+          static_cast<unsigned>(finalPending), finalMode);
+      sampleBatteryEveryWake();
+      wifiAttemptedThisWake = false;
+      syncFrame(finalMode);
+      continue;
+    }
+
+    // NVS writes above are synchronous. Leaving the Preferences handle open
+    // until reset avoids creating another button-loss window before sleep.
+    esp_deep_sleep_start();
+  }
 }
 
 }  // namespace
@@ -1039,15 +1224,18 @@ void setup() {
   pinMode(kButton3, INPUT_PULLUP);
   pinMode(kBatteryEnablePin, OUTPUT);
   digitalWrite(kBatteryEnablePin, LOW);
+  attachButtonInterrupts();
   setenv("TZ", EINK_TIMEZONE, 1);
   tzset();
   delay(750);
-  Serial.println("EE02 image and daily battery updater starting");
+  Serial.println("EE02 scheduled image and per-wake battery updater starting");
   const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   const char *requestedFrameMode = EINK_FRAME_MODE;
+  uint8_t wakeButtonNumber = 0;
   if (wakeCause == ESP_SLEEP_WAKEUP_EXT1) {
     const uint64_t wakeStatus =
         esp_sleep_get_ext1_wakeup_status() & kButtonWakeMask;
+    wakeButtonNumber = buttonNumberForWakeStatus(wakeStatus);
     const char *buttonFrameMode = frameModeForButtonWake(wakeStatus);
     if (buttonFrameMode != nullptr) {
       requestedFrameMode = buttonFrameMode;
@@ -1085,27 +1273,22 @@ void setup() {
   }
   loadBatteryState();
   loadDisplayState();
+  sampleBatteryEveryWake();
 
   if (!configurationIsUsable()) {
     sleepUntilButton();
     return;
   }
+  while (anyButtonIsPressed()) {
+    delay(10);
+  }
+  // The falling-edge ISR may see contact bounce from the same press that EXT1
+  // already consumed. Remove that one duplicate after release while preserving
+  // a different button pressed during boot.
+  discardWakeButtonLatch(wakeButtonNumber);
 
   struct tm localClock {};
-  const bool retainedClockWasValid = readLocalClock(localClock);
-  if (retainedClockWasValid) {
-    // On ordinary deep-sleep wakes this happens before Wi-Fi or panel load.
-    sampleBatteryIfDue(&localClock);
-  }
-  const bool clockIsReady = synchronizeClockIfDue(localClock);
-  if (clockIsReady) {
-    // Re-evaluate in case NTP crossed an hour/date boundary.
-    sampleBatteryIfDue(&localClock);
-  } else if (!retainedClockWasValid) {
-    // First boot without internet still gets a useful estimate. Day zero makes
-    // it eligible again once a trustworthy 06:00 local time is available.
-    sampleBatteryIfDue(nullptr);
-  }
+  synchronizeClockIfDue(localClock);
 
   syncFrame(requestedFrameMode);
   sleepUntilButton();

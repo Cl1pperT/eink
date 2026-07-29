@@ -26,6 +26,9 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         cls.battery = (FIRMWARE / "include/battery_monitor.h").read_text(
             encoding="utf-8"
         )
+        cls.wake_schedule = (FIRMWARE / "include/wake_schedule.h").read_text(
+            encoding="utf-8"
+        )
         cls.source = (FIRMWARE / "src/main.cpp").read_text(encoding="utf-8")
         cls.workflow = (
             REPOSITORY / ".github/workflows/esp32-firmware.yml"
@@ -60,34 +63,47 @@ class ESP32FirmwareContractTests(unittest.TestCase):
     def test_download_is_authenticated_and_validated_before_refresh(self):
         for required in (
             'http.addHeader("Authorization"',
-            'http.addHeader("If-None-Match"',
             'http.header("ETag")',
+            'http.header("X-Frame-ETag")',
             'http.header("X-Frame-SHA256")',
             'http.header("X-Content-SHA256")',
             'http.header("X-Frame-Format")',
+            'http.header("X-Next-Wake-Epoch")',
+            'manifestUrl(requestedMode)',
+            'immutableFrameUrl(manifest.mode, manifest.frameSha)',
             "http.getSize() == static_cast<int>(eink::kFrameBytes)",
             "sha256Hex(staging, eink::kFrameBytes)",
             "hasOnlySupportedColors(staging, eink::kFrameBytes)",
         ):
             self.assertIn(required, self.source)
 
-        verify_at = self.source.index("if (actualSha != expectedSha)")
-        colors_at = self.source.index("hasOnlySupportedColors(staging")
+        download_function_at = self.source.index("uint8_t *downloadFrame(")
+        verify_at = self.source.index(
+            "if (actualSha != manifest.frameSha)", download_function_at
+        )
+        colors_at = self.source.index(
+            "hasOnlySupportedColors(staging", verify_at
+        )
         invalidate_at = self.source.index(
             "if (!invalidatePersistedDisplayState())", colors_at
         )
-        refresh_at = self.source.index("refreshPanel(staging)")
-        persist_at = self.source.index("persistDisplayState(mode, actualSha, etag)")
+        refresh_at = self.source.index("refreshPanel(staging)", invalidate_at)
+        persist_at = self.source.index("persistDisplayState(", refresh_at)
+        sync_at = self.source.index("SyncResult syncFrame(")
+        manifest_at = self.source.index(
+            "fetchManifest(requestedMode, manifest)", sync_at
+        )
+        download_at = self.source.index("downloadFrame(manifest)", manifest_at)
         self.assertLess(verify_at, colors_at)
+        self.assertLess(manifest_at, download_at)
         self.assertLess(colors_at, invalidate_at)
         self.assertLess(invalidate_at, refresh_at)
         self.assertLess(refresh_at, persist_at)
 
-    def test_power_loss_marker_and_bad_304_recovery_are_present(self):
+    def test_power_loss_marker_is_present(self):
         self.assertIn('kPreferenceValid[] = "state-valid"', self.source)
         self.assertIn("preferences.putBool(kPreferenceValid, false)", self.source)
         self.assertIn("preferences.putBool(kPreferenceValid, true)", self.source)
-        self.assertIn("return syncFrame(mode, true);", self.source)
 
     def test_compile_time_guards_cover_psram_and_exact_driver_palette(self):
         self.assertIn("#ifndef BOARD_HAS_PSRAM", self.source)
@@ -130,6 +146,21 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertIn("ESP_EXT1_WAKEUP_ANY_LOW", self.source)
         self.assertIn("esp_sleep_get_ext1_wakeup_status()", self.source)
         self.assertIn("frameModeForButtonWake(wakeStatus)", self.source)
+        self.assertIn("discardWakeButtonLatch(wakeButtonNumber);", self.source)
+        self.assertIn("attachButtonInterrupts();", self.source)
+        self.assertIn("takePendingButton()", self.source)
+        attach_at = self.source.index("attachButtonInterrupts();")
+        boot_delay_at = self.source.index("delay(750);")
+        self.assertLess(attach_at, boot_delay_at)
+        final_pending_at = self.source.index(
+            "const uint8_t finalPending = takePendingButton();"
+        )
+        sleep_at = self.source.index("esp_deep_sleep_start();")
+        self.assertLess(final_pending_at, sleep_at)
+        self.assertIn(
+            'Serial.printf("Requesting updated %s manifest',
+            self.source,
+        )
         self.assertIn(
             "esp_sleep_enable_timer_wakeup(timerWakeSeconds * 1000000ULL)",
             self.source,
@@ -164,10 +195,9 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertEqual(self.source.count("epaper.drawString("), 1)
         self.assertNotIn("epaper.pushImage(", self.source)
 
-    def test_ee02_gated_battery_adc_is_sampled_once_per_local_day(self):
+    def test_ee02_gated_battery_adc_is_sampled_every_wake(self):
         self.assertIn("#define EINK_BATTERY_ADC_PIN 1", self.device_config)
         self.assertIn("#define EINK_BATTERY_ENABLE_PIN 6", self.device_config)
-        self.assertIn("#define EINK_BATTERY_SAMPLE_HOUR 6", self.device_config)
         self.assertIn("#define EINK_BATTERY_SAMPLE_COUNT 25", self.device_config)
         enable_at = self.source.index("digitalWrite(kBatteryEnablePin, HIGH)")
         discard_at = self.source.index(
@@ -179,26 +209,38 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertLess(enable_at, discard_at)
         self.assertLess(discard_at, disable_at)
         self.assertIn("ADC_11db", self.source)
-        self.assertIn("attemptedLocalDay != today", self.battery)
-        self.assertIn('kPreferenceBatteryAttemptDay[] = "bat-try"', self.source)
-        self.assertIn("initialBatteryAttempted", self.source)
+        self.assertIn("void sampleBatteryEveryWake()", self.source)
+        load_at = self.source.index("loadDisplayState();")
+        sample_at = self.source.index("sampleBatteryEveryWake();", load_at)
+        sync_at = self.source.index("syncFrame(requestedFrameMode);", sample_at)
+        self.assertLess(load_at, sample_at)
+        self.assertLess(sample_at, sync_at)
+        self.assertIn("stabilizeBatteryPercent", self.source)
         self.assertIn("persistBatteryState();", self.source)
 
-    def test_daily_clock_is_ntp_backed_and_timer_aligns_to_six(self):
+    def test_pi_deadline_controls_timer_with_short_retry_fallback(self):
         self.assertIn(
             '#define EINK_TIMEZONE "MST7MDT,M3.2.0,M11.1.0"',
             self.device_config,
         )
         self.assertIn("configTzTime(EINK_TIMEZONE", self.source)
         self.assertIn("SNTP_SYNC_STATUS_COMPLETED", self.source)
-        self.assertIn("target.tm_hour = EINK_BATTERY_SAMPLE_HOUR", self.source)
         self.assertIn("#define EINK_NTP_RETRY_WAKES 12", self.device_config)
         self.assertIn("clockAttemptedLocalDay == currentLocalDay", self.source)
         self.assertIn("ntpRetryWakesRemaining", self.source)
         self.assertIn(
-            "if (untilTarget > 0 && untilTarget < wakeSeconds)",
+            "#define EINK_MAX_SCHEDULE_SLEEP_SECONDS 86400ULL",
+            self.device_config,
+        )
+        self.assertIn(
+            "makeWakeDeadline(",
             self.source,
         )
+        self.assertIn(
+            "remainingWakeSeconds(",
+            self.source,
+        )
+        self.assertIn("return fallbackSeconds;", self.wake_schedule)
 
     def test_cached_and_physically_shown_battery_states_are_separate(self):
         battery_commit_at = self.source.index("persistBatteryState();")
@@ -208,12 +250,12 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertIn('kPreferenceMarkValid[] = "mark-valid"', self.source)
         self.assertIn('kPreferenceMarkVersion[] = "mark-ver"', self.source)
         self.assertIn("batteryMarkNeedsRefresh()", self.source)
-        self.assertIn("bypassValidator = true;", self.source)
-        self.assertRegex(
-            self.source,
-            r"actualSha == displayedSha && etag == displayedEtag &&\s+"
-            r"!batteryMarkNeedsRefresh\(\)",
-        )
+        self.assertIn("baseMatches && !batteryMarkNeedsRefresh()", self.source)
+        manifest_at = self.source.index("fetchManifest(requestedMode, manifest)")
+        matching_at = self.source.index("const bool baseMatches", manifest_at)
+        download_at = self.source.index("downloadFrame(manifest)", matching_at)
+        self.assertLess(manifest_at, matching_at)
+        self.assertLess(matching_at, download_at)
 
     def test_signature_is_small_handwritten_and_exact_palette(self):
         self.assertIn("setFreeFont(&Satisfy_24)", self.source)
@@ -250,7 +292,7 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertIn("kMinimumPlausibleBatteryMillivolts = 2500", self.battery)
         self.assertIn("kMaximumPlausibleBatteryMillivolts = 4350", self.battery)
 
-    def test_host_battery_curve_and_daily_decisions(self):
+    def test_host_battery_curve_and_wake_deadline_helpers(self):
         compiler = (
             shutil.which("c++")
             or shutil.which("clang++")
@@ -258,44 +300,50 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         )
         if compiler is None:
             self.skipTest("a host C++ compiler is not available")
-        source = REPOSITORY / "tests/cpp/esp32_battery_monitor_test.cpp"
+        sources = (
+            "esp32_battery_monitor_test.cpp",
+            "esp32_wake_schedule_test.cpp",
+        )
         with tempfile.TemporaryDirectory() as temporary_directory:
-            executable = Path(temporary_directory) / "battery-monitor-test"
-            compile_result = subprocess.run(
-                [
-                    compiler,
-                    "-std=c++11",
-                    "-Wall",
-                    "-Wextra",
-                    "-Werror",
-                    "-I",
-                    str(FIRMWARE / "include"),
-                    str(source),
-                    "-o",
-                    str(executable),
-                ],
-                cwd=REPOSITORY,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(
-                compile_result.returncode,
-                0,
-                compile_result.stdout + compile_result.stderr,
-            )
-            run_result = subprocess.run(
-                [str(executable)],
-                cwd=REPOSITORY,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(
-                run_result.returncode,
-                0,
-                run_result.stdout + run_result.stderr,
-            )
+            for source_name in sources:
+                with self.subTest(source=source_name):
+                    source = REPOSITORY / "tests/cpp" / source_name
+                    executable = Path(temporary_directory) / source.stem
+                    compile_result = subprocess.run(
+                        [
+                            compiler,
+                            "-std=c++11",
+                            "-Wall",
+                            "-Wextra",
+                            "-Werror",
+                            "-I",
+                            str(FIRMWARE / "include"),
+                            str(source),
+                            "-o",
+                            str(executable),
+                        ],
+                        cwd=REPOSITORY,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(
+                        compile_result.returncode,
+                        0,
+                        compile_result.stdout + compile_result.stderr,
+                    )
+                    run_result = subprocess.run(
+                        [str(executable)],
+                        cwd=REPOSITORY,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(
+                        run_result.returncode,
+                        0,
+                        run_result.stdout + run_result.stderr,
+                    )
 
     def test_real_credentials_are_not_part_of_the_project(self):
         ignored = (FIRMWARE / ".gitignore").read_text(encoding="utf-8")

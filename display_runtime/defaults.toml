@@ -19,8 +19,11 @@ timezone = "America/Denver"
 
 [schedule]
 weather_start = "06:00"
-birds_start = "10:00"
+# `star_start` remains accepted as a legacy/operator setting, but the headless
+# runtime now activates stars from the astronomical sunset offset below.
+birds_start = "09:00"
 star_start = "20:00"
+star_sunset_offset_minutes = 30
 
 [conversion]
 dithering = true

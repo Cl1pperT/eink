@@ -18,6 +18,11 @@ inline bool isFrameChannel(const String &mode) {
          mode == "test-pattern";
 }
 
+inline bool isConcreteFrameMode(const String &mode) {
+  return mode == "weather" || mode == "birds" || mode == "star-map" ||
+         mode == "uploaded-photo" || mode == "test-pattern";
+}
+
 inline bool isAllowedColorCode(uint8_t value) {
   // Setup510 sprite nibbles: white, green, red, yellow, blue, black.
   return value == 0x0 || value == 0x2 || value == 0x6 || value == 0xB ||

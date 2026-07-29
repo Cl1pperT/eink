@@ -335,7 +335,7 @@ class FrameRuntimeTests(unittest.TestCase):
                     "star-map": lambda: StarMetadataSource(dict(metadata)),
                 },
             )
-            when = parse_render_time("2026-07-27T19:55:00", config.timezone)
+            when = parse_render_time("2026-07-27T12:00:00", config.timezone)
 
             with patch.object(
                 runtime,
@@ -560,7 +560,7 @@ class FrameRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = config_for(Path(directory))
             runtime = FrameRuntime(config)
-            morning_utc = datetime.fromisoformat("2026-07-11T15:00:00+00:00")
+            morning_utc = datetime.fromisoformat("2026-07-11T14:00:00+00:00")
             noon_utc = datetime.fromisoformat("2026-07-11T18:00:00+00:00")
             night_utc = datetime.fromisoformat("2026-07-12T03:00:00+00:00")
 
@@ -594,7 +594,7 @@ class FrameRuntimeTests(unittest.TestCase):
             settings_path = root / "control.json"
             config = config_for(root, control_settings_path=settings_path)
             runtime = FrameRuntime(config)
-            morning = datetime.fromisoformat("2026-07-11T15:00:00+00:00")
+            morning = datetime.fromisoformat("2026-07-11T14:00:00+00:00")
             store = DemoOverrideStore(settings_path, clock=lambda: morning)
             store.activate("birds")
 
@@ -604,6 +604,11 @@ class FrameRuntimeTests(unittest.TestCase):
                 return_value={"display_mode": "automatic"},
             ):
                 self.assertEqual(runtime.resolve_active_mode(morning), "birds")
+                active = runtime.resolve_active_state(morning)
+                self.assertEqual(
+                    active.next_wake_at,
+                    morning + timedelta(minutes=5),
+                )
                 self.assertEqual(
                     runtime.resolve_active_mode(morning + timedelta(minutes=4, seconds=59)),
                     "birds",

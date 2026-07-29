@@ -9,6 +9,7 @@ description = "Headless Raspberry Pi renderer and macOS simulator for a Spectra 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "astral>=3.2,<4",
   "Pillow>=10,<13",
 ]
 
@@ -16,7 +17,6 @@ dependencies = [
 integrations = [
   "playwright>=1.45",
   "starplot>=0.20.4,<0.21",
-  "astral>=3.2",
   "pytz>=2025.2",
   "pyarrow>=20,<21",
 ]

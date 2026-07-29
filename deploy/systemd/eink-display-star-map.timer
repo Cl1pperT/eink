@@ -1,8 +1,8 @@
 [Unit]
-Description=Render the nighttime star-map frame each day
+Description=Pre-render tonight's sunset-aware star-map frame each day
 
 [Timer]
-OnCalendar=*-*-* 19:55:00
+OnCalendar=*-*-* 12:00:00
 AccuracySec=1min
 RandomizedDelaySec=30s
 Persistent=true

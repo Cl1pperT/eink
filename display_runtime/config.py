@@ -10,9 +10,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import tomllib
 
 from display_simulator.models import ConversionSettings, FitMode, Orientation
-from display_simulator.schedule import ScheduleConfig, parse_clock
+from display_simulator.schedule import parse_clock
 
 from .ee02 import EE02EncodingError, LandscapeRotation, parse_landscape_rotation
+from .schedule import ScheduleConfig
 
 
 class ConfigError(ValueError):
@@ -228,12 +229,21 @@ def _parse(data: Mapping[str, Any], path: Path | None) -> RuntimeConfig:
         schedule = ScheduleConfig(
             parse_clock(_string(schedule_data["weather_start"], "schedule.weather_start")),
             parse_clock(_string(schedule_data["birds_start"], "schedule.birds_start")),
-            parse_clock(_string(schedule_data["star_start"], "schedule.star_start")),
+            _integer(
+                schedule_data["star_sunset_offset_minutes"],
+                "schedule.star_sunset_offset_minutes",
+            ),
         )
     except (TypeError, ValueError) as exc:
-        raise ConfigError(f"schedule times must use 24-hour HH:MM values: {exc}") from exc
-    if not schedule.weather_start < schedule.birds_start < schedule.star_start:
-        raise ConfigError("schedule must satisfy weather_start < birds_start < star_start")
+        raise ConfigError(
+            f"schedule times must use 24-hour HH:MM values: {exc}"
+        ) from exc
+    if not schedule.weather_start < schedule.birds_start:
+        raise ConfigError("schedule must satisfy weather_start < birds_start")
+    if not 0 <= schedule.star_sunset_offset_minutes <= 360:
+        raise ConfigError(
+            "schedule.star_sunset_offset_minutes must be between 0 and 360"
+        )
 
     saturation = _number(conversion["saturation"], "conversion.saturation")
     blue_bias = _number(conversion["blue_bias"], "conversion.blue_bias")

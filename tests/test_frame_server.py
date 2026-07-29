@@ -6,13 +6,19 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+from datetime import datetime
 from typing import Callable
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from display_runtime.ee02 import EE02_PAYLOAD_BYTES, EE02_WIRE_FORMAT
-from display_runtime.frame_server import FRAME_CONTENT_TYPE, FrameServer, frame_etag
+from display_runtime.frame_server import (
+    FRAME_CONTENT_TYPE,
+    FrameSelection,
+    FrameServer,
+    frame_etag,
+)
 
 
 TOKEN = "test-token-with-enough-entropy"
@@ -84,6 +90,7 @@ def running_server(
     *,
     auth_token: str = TOKEN,
     active_mode_resolver: Callable[[], str] | None = None,
+    active_state_resolver: Callable[[], FrameSelection] | None = None,
 ):
     try:
         server = FrameServer(
@@ -91,6 +98,7 @@ def running_server(
             output_directory=output_directory,
             auth_token=auth_token,
             active_mode_resolver=active_mode_resolver,
+            active_state_resolver=active_state_resolver,
             chunk_size=4096,
             log_requests=False,
         )
@@ -132,6 +140,82 @@ def request(
 
 
 class FrameServerTests(unittest.TestCase):
+    def test_dynamic_manifest_advertises_next_wake_without_mutating_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            payload, checksum, _ = write_committed_frame(
+                output, mode="weather", byte=0x6F
+            )
+            committed_path = output / "weather" / "current.json"
+            committed = committed_path.read_bytes()
+            state = {
+                "value": FrameSelection(
+                    mode="weather",
+                    evaluated_at=datetime.fromisoformat(
+                        "2026-07-29T18:00:00+00:00"
+                    ),
+                    next_wake_at=datetime.fromisoformat(
+                        "2026-07-30T03:13:34+00:00"
+                    ),
+                )
+            }
+
+            with running_server(
+                output,
+                active_state_resolver=lambda: state["value"],
+            ) as server:
+                with request(server, "/v1/manifest/active") as response:
+                    manifest = json.loads(response.read())
+                    first_etag = response.headers["ETag"]
+                    self.assertEqual(manifest["mode"], "weather")
+                    self.assertEqual(
+                        manifest["next_wake_at"], "2026-07-30T03:13:34Z"
+                    )
+                    self.assertEqual(
+                        response.headers["X-Next-Wake-Epoch"], "1785381214"
+                    )
+                    self.assertEqual(
+                        response.headers["X-Server-Epoch"], "1785348000"
+                    )
+
+                with self.assertRaises(HTTPError) as caught:
+                    request(
+                        server,
+                        "/v1/manifest/weather",
+                        headers={"If-None-Match": first_etag},
+                    )
+                self.assertEqual(caught.exception.code, 304)
+                self.assertEqual(
+                    caught.exception.headers["X-Next-Wake-At"],
+                    "2026-07-30T03:13:34Z",
+                )
+
+                with request(server, "/v1/frame/weather") as response:
+                    self.assertEqual(response.read(), payload)
+                    self.assertEqual(response.headers["X-Frame-SHA256"], checksum)
+                    self.assertEqual(
+                        response.headers["X-Next-Wake-At"],
+                        "2026-07-30T03:13:34Z",
+                    )
+
+                state["value"] = FrameSelection(
+                    mode="weather",
+                    evaluated_at=datetime.fromisoformat(
+                        "2026-07-30T03:13:34+00:00"
+                    ),
+                    next_wake_at=datetime.fromisoformat(
+                        "2026-07-30T12:00:00+00:00"
+                    ),
+                )
+                with request(server, "/v1/manifest/weather") as response:
+                    self.assertNotEqual(response.headers["ETag"], first_etag)
+                    self.assertEqual(
+                        json.loads(response.read())["next_wake_at"],
+                        "2026-07-30T12:00:00Z",
+                    )
+
+            self.assertEqual(committed_path.read_bytes(), committed)
+
     def test_active_channel_resolves_each_request_and_reports_concrete_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

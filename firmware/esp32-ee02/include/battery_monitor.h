@@ -10,11 +10,6 @@ struct BatteryCurvePoint {
   uint8_t percent;
 };
 
-struct BatterySampleDecision {
-  bool due;
-  bool daily;
-};
-
 // Generic unloaded 1-cell Li-ion/LiPo voltage curve. Voltage-only state of
 // charge is necessarily approximate; these anchors are intentionally easy to
 // replace with values from the fitted cell's datasheet.
@@ -55,17 +50,19 @@ inline uint8_t estimateBatteryPercent(uint16_t millivolts) {
   return 100;
 }
 
-inline BatterySampleDecision decideBatterySample(
-    bool hasLocalDay, int localHour, uint32_t today,
-    uint32_t attemptedLocalDay, bool hasCachedReading,
-    bool initialAttempted, int sampleHour) {
-  const bool daily =
-      hasLocalDay && localHour >= sampleHour &&
-      attemptedLocalDay != today;
-  const bool initial =
-      (!hasLocalDay || localHour < sampleHour) &&
-      !hasCachedReading && !initialAttempted;
-  return {daily || initial, daily};
+inline uint8_t stabilizeBatteryPercent(uint16_t millivolts,
+                                       bool hasPreviousEstimate,
+                                       uint8_t previousPercent) {
+  const uint8_t estimated = estimateBatteryPercent(millivolts);
+  if (!hasPreviousEstimate || previousPercent > 100) {
+    return estimated;
+  }
+  const int difference =
+      static_cast<int>(estimated) - static_cast<int>(previousPercent);
+  // A one-point display change is usually ADC/load noise. Waiting for a
+  // two-point move prevents needless 13.3-inch refreshes while every wake
+  // still records a fresh voltage measurement.
+  return difference >= -1 && difference <= 1 ? previousPercent : estimated;
 }
 
 inline size_t clockwiseBackingPixelIndex(size_t logicalX,

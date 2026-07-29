@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - Python 3.11+ is required
 DEFAULTS: dict[str, Any] = {
     "display": {"orientation": "landscape", "physical_treatment": True},
     "location": {"name": "Denver, Colorado"},
-    "schedule": {"weather_start": "06:00", "birds_start": "10:00", "star_start": "20:00"},
+    "schedule": {"weather_start": "06:00", "birds_start": "09:00", "star_start": "20:00"},
     "conversion": {"dithering": True, "method": "floyd-steinberg", "saturation": 0.6, "blue_bias": 0.5},
     "photo": {"saturation": 0.35, "blue_bias": 0.0},
     "repositories": {"avian_weather": "", "inkystarmap": ""},

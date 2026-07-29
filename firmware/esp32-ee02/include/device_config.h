@@ -48,10 +48,6 @@
 #define EINK_BATTERY_SAMPLE_COUNT 25
 #endif
 
-#ifndef EINK_BATTERY_SAMPLE_HOUR
-#define EINK_BATTERY_SAMPLE_HOUR 6
-#endif
-
 // POSIX timezone for America/Denver, including current US DST transitions.
 // Override this build flag if the display moves to another timezone.
 #ifndef EINK_TIMEZONE
@@ -74,4 +70,14 @@
 // this many ordinary deep-sleep wakes before another NTP request.
 #ifndef EINK_NTP_RETRY_WAKES
 #define EINK_NTP_RETRY_WAKES 12
+#endif
+
+// A missing, stale, or malformed Pi deadline falls back to the short check
+// interval. Valid absolute schedule deadlines must remain within this bound.
+#ifndef EINK_MAX_SCHEDULE_SLEEP_SECONDS
+#define EINK_MAX_SCHEDULE_SLEEP_SECONDS 86400ULL
+#endif
+
+#ifndef EINK_MAX_MANIFEST_BYTES
+#define EINK_MAX_MANIFEST_BYTES 65536UL
 #endif

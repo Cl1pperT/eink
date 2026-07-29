@@ -7,7 +7,7 @@ from datetime import datetime, time
 @dataclass(frozen=True, slots=True)
 class ScheduleConfig:
     weather_start: time = time(6, 0)
-    birds_start: time = time(10, 0)
+    birds_start: time = time(9, 0)
     star_start: time = time(20, 0)
 
 

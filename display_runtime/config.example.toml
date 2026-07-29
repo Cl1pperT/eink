@@ -22,8 +22,10 @@ timezone = "America/Denver"
 
 [schedule]
 weather_start = "06:00"
-birds_start = "10:00"
+birds_start = "09:00"
+# Legacy simulator fallback; the Pi uses sunset + the offset below.
 star_start = "20:00"
+star_sunset_offset_minutes = 30
 
 [conversion]
 dithering = true

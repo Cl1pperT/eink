@@ -123,8 +123,9 @@ not modify either native image or saved output.
 ## Using the simulator
 
 Choose a display mode and simulated time, then select **Generate / Refresh
-Preview**. Automatic mode uses the configurable schedule (Weather 06:00,
-Birds 10:00, Star Map 20:00 by default). Moving the time slider only updates the
+Preview**. Automatic mode uses the configurable desktop schedule (Weather
+06:00, Birds 09:00, Star Map 20:00 by default). Moving the time slider only
+updates the
 mode label unless auto-render is enabled; auto-render is debounced and only
 occurs across mode boundaries.
 

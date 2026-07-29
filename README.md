@@ -34,11 +34,13 @@ SHA-256, and refreshes through pinned Seeed_GFX Setup510 only after validation.
 The Pi performs landscape rotation; the ESP32 copies native backing bytes
 without transforming the base art. It then adds a discreet, contrast-aware
 handwritten battery estimate in the logical bottom-right corner. The EE02's
-built-in battery divider is sampled once per day at 06:00 using an NTP-backed
-local clock; no external divider is needed. Every five minutes the ESP32 polls
-the Pi's virtual `active` channel, which resolves either the phone-selected
-mode or the configured morning-weather, daytime-birds, and nighttime-star
-schedule.
+built-in battery divider is sampled on every wake; no external divider is
+needed. The ESP32 first requests the Pi's virtual `active` manifest, downloads a
+full frame only when artwork or the displayed charge changes, and otherwise
+deep-sleeps until the Pi-advertised boundary or a physical button. Automatic
+mode shows weather at 06:00, birds at 09:00, and the star map from local sunset
+plus 30 minutes; the map itself remains charted for sunset plus 90 minutes.
+Failed or invalid schedule responses retry after five minutes.
 
 ```bash
 cd firmware/esp32-ee02
@@ -116,7 +118,7 @@ The Overview page and Stars tab also provide a diagnostic **Five-minute demo**
 for Weather, Birds, Stars, or the uploaded Image. It selects the latest
 committed artwork without rendering or changing the saved display mode. Press
 the frame's physical button to fetch it immediately. At expiry, the next button
-press or automatic ESP check resumes the saved manual mode or automatic
+press or advertised demo-expiry wake resumes the saved manual mode or automatic
 schedule. This override never enables fixture/demo artwork; it only selects an
 already committed production frame.
 
@@ -126,7 +128,7 @@ reports as visitors to the property or claim to provide local recordings.
 
 The desktop simulator generates 1600×1200 landscape or 1200×1600 portrait
 previews. On the Pi, control-panel actions commit hardware-ready frames that the
-ESP32 picks up on its next poll. See
+ESP32 picks up on its next scheduled or physical-button wake. See
 [display_simulator/README.md](display_simulator/README.md) for desktop setup,
 controls, offline mode, integrations, and limitations.
 

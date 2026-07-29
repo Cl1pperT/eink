@@ -12,6 +12,8 @@ at the start of every request.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,6 +64,58 @@ class ArtifactNotFound(FrameServerError):
 
 class ArtifactUnavailable(FrameServerError):
     """A committed artifact is malformed, corrupt, or temporarily unreadable."""
+
+
+@dataclass(frozen=True, slots=True)
+class FrameSelection:
+    """One request-time automatic selection and its next absolute deadline."""
+
+    mode: str
+    evaluated_at: datetime
+    next_wake_at: datetime
+
+
+def _utc_timestamp(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ArtifactUnavailable("frame schedule returned a naive timestamp")
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def _schedule_headers(selection: FrameSelection | None) -> dict[str, str]:
+    if selection is None:
+        return {}
+    evaluated_text = _utc_timestamp(selection.evaluated_at)
+    next_wake_text = _utc_timestamp(selection.next_wake_at)
+    evaluated = selection.evaluated_at.astimezone(timezone.utc)
+    next_wake = selection.next_wake_at.astimezone(timezone.utc)
+    if next_wake <= evaluated:
+        raise ArtifactUnavailable("frame schedule returned a stale deadline")
+    return {
+        "X-Server-Time": evaluated_text,
+        "X-Next-Wake-At": next_wake_text,
+        "X-Server-Epoch": str(int(evaluated.timestamp())),
+        "X-Next-Wake-Epoch": str(int(next_wake.timestamp())),
+    }
+
+
+def _decorate_manifest(payload: bytes, selection: FrameSelection | None) -> bytes:
+    if selection is None:
+        return payload
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise ArtifactUnavailable("current manifest is not valid JSON") from exc
+    manifest = _require_mapping(value, "root")
+    decorated = dict(manifest)
+    decorated["next_wake_at"] = _utc_timestamp(selection.next_wake_at)
+    payload = (json.dumps(decorated, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    if len(payload) > MAX_MANIFEST_BYTES:
+        raise ArtifactUnavailable("decorated manifest is too large")
+    return payload
 
 
 def frame_etag(sha256: str) -> str:
@@ -317,6 +371,7 @@ class FrameServer(ThreadingHTTPServer):
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         active_mode_resolver: Callable[[], str] | None = None,
+        active_state_resolver: Callable[[], FrameSelection] | None = None,
         log_requests: bool = True,
     ) -> None:
         token = str(auth_token)
@@ -339,12 +394,21 @@ class FrameServer(ThreadingHTTPServer):
         self.request_timeout = float(request_timeout)
         if active_mode_resolver is not None and not callable(active_mode_resolver):
             raise ValueError("active_mode_resolver must be callable")
+        if active_state_resolver is not None and not callable(active_state_resolver):
+            raise ValueError("active_state_resolver must be callable")
+        if active_mode_resolver is not None and active_state_resolver is not None:
+            raise ValueError(
+                "active_mode_resolver and active_state_resolver are mutually exclusive"
+            )
         self.active_mode_resolver = active_mode_resolver
+        self.active_state_resolver = active_state_resolver
         self._worker_slots = BoundedSemaphore(max_connections)
         self.log_requests = bool(log_requests)
         super().__init__(server_address, FrameRequestHandler)
 
-    def resolve_mode(self, requested_mode: str) -> str:
+    def resolve_request(
+        self, requested_mode: str
+    ) -> tuple[str, FrameSelection | None]:
         """Resolve a concrete mode for one request.
 
         ``active`` is intentionally resolved at request time rather than cached,
@@ -353,10 +417,32 @@ class FrameServer(ThreadingHTTPServer):
         arbitrary fallback would be less safe than leaving the panel unchanged.
         """
 
+        selection: FrameSelection | None = None
+        selection_error: Exception | None = None
+        if self.active_state_resolver is not None:
+            try:
+                candidate = self.active_state_resolver()
+                if not isinstance(candidate, FrameSelection):
+                    raise TypeError("active state resolver returned an invalid value")
+                if candidate.mode not in CONCRETE_MODES:
+                    raise ValueError("active state resolver returned an invalid mode")
+                _schedule_headers(candidate)
+                selection = candidate
+            except Exception as exc:
+                selection_error = exc
+
         if requested_mode in CONCRETE_MODES:
-            return requested_mode
+            # A schedule failure must not hide an otherwise valid concrete
+            # button frame. The ESP will receive no deadline and retry shortly.
+            return requested_mode, selection
         if requested_mode != ACTIVE_MODE:
             raise ArtifactNotFound("unknown display mode")
+        if self.active_state_resolver is not None:
+            if selection is None:
+                raise ArtifactUnavailable(
+                    "active display state could not be resolved"
+                ) from selection_error
+            return selection.mode, selection
         if self.active_mode_resolver is None:
             raise ArtifactUnavailable("active display mode is not configured")
         try:
@@ -367,7 +453,7 @@ class FrameServer(ThreadingHTTPServer):
             raise ArtifactUnavailable(
                 "active display mode resolver returned an invalid mode"
             )
-        return selected
+        return selected, None
 
     def get_request(self):
         request, client_address = super().get_request()
@@ -486,7 +572,7 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
 
     def _serve_manifest(self, mode: str, *, send_body: bool) -> None:
         requested_mode = mode
-        mode = self.frame_server.resolve_mode(requested_mode)
+        mode, selection = self.frame_server.resolve_request(requested_mode)
         payload, wire_sha, frame_path = _read_manifest(
             self.frame_server.output_directory, mode
         )
@@ -505,6 +591,7 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
             raise ArtifactUnavailable(
                 "current manifest references a missing frame payload"
             ) from exc
+        payload = _decorate_manifest(payload, selection)
         etag = _manifest_etag(payload)
         frame_tag = frame_etag(wire_sha)
         common_headers = {
@@ -513,6 +600,7 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
             "X-Content-SHA256": wire_sha,
             "X-Frame-SHA256": wire_sha,
             "X-Frame-Format": EE02_WIRE_FORMAT,
+            **_schedule_headers(selection),
         }
         if requested_mode == ACTIVE_MODE:
             common_headers["X-Resolved-Mode"] = mode
@@ -531,7 +619,7 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
         self, mode: str, requested_sha: str | None, *, send_body: bool
     ) -> None:
         requested_mode = mode
-        mode = self.frame_server.resolve_mode(requested_mode)
+        mode, selection = self.frame_server.resolve_request(requested_mode)
         manifest_path: Path | None = None
         if requested_sha is None:
             _payload, wire_sha, manifest_path = _read_manifest(
@@ -561,6 +649,7 @@ class FrameRequestHandler(BaseHTTPRequestHandler):
             "X-Content-SHA256": wire_sha,
             "X-Frame-SHA256": wire_sha,
             "X-Frame-Format": EE02_WIRE_FORMAT,
+            **_schedule_headers(selection),
         }
         if requested_mode == ACTIVE_MODE:
             common_headers["X-Resolved-Mode"] = mode
@@ -662,6 +751,7 @@ def running_frame_server(
     max_connections: int = DEFAULT_MAX_CONNECTIONS,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     active_mode_resolver: Callable[[], str] | None = None,
+    active_state_resolver: Callable[[], FrameSelection] | None = None,
     log_requests: bool = False,
 ) -> Iterator[FrameServer]:
     """Run a frame server in a background thread for a bounded scope."""
@@ -674,6 +764,7 @@ def running_frame_server(
         max_connections=max_connections,
         request_timeout=request_timeout,
         active_mode_resolver=active_mode_resolver,
+        active_state_resolver=active_state_resolver,
         log_requests=log_requests,
     )
     thread = server.start_in_thread()
@@ -694,6 +785,7 @@ __all__ = [
     "DEFAULT_MAX_CONNECTIONS",
     "DEFAULT_REQUEST_TIMEOUT",
     "FRAME_CONTENT_TYPE",
+    "FrameSelection",
     "FrameRequestHandler",
     "FrameServer",
     "FrameServerError",

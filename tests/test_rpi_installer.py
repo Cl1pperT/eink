@@ -171,8 +171,8 @@ class RaspberryPiInstallerTests(unittest.TestCase):
 
             expected_timers = {
                 "weather": "05:55:00",
-                "birds": "09:55:00",
-                "star-map": "19:55:00",
+                "birds": "08:55:00",
+                "star-map": "12:00:00",
             }
             for mode, time_of_day in expected_timers.items():
                 timer = units[f"eink-display-{mode}.timer"]

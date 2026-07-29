@@ -23,7 +23,6 @@ from PIL import Image
 from display_simulator.models import RenderContext
 from display_simulator.pipeline import ImagePipeline, SPECTRA_PALETTE, checksum_image, validate_palette
 from display_simulator.repositories import find_repository
-from display_simulator.schedule import mode_for_time
 from display_simulator.sources import (
     BirdsSource,
     StarMapSource,
@@ -42,6 +41,8 @@ from .ee02 import (
     EncodedEE02Frame,
     encode_ee02,
 )
+from .frame_server import FrameSelection
+from .schedule import ScheduleState, schedule_state
 
 
 SCHEMA_VERSION = 2
@@ -206,7 +207,9 @@ def _load_control_overlay(
     return dict(nested) if isinstance(nested, Mapping) else dict(loaded)
 
 
-def _active_demo_mode(path: Path | None, when: datetime) -> str | None:
+def _active_demo_override(
+    path: Path | None, when: datetime
+) -> tuple[str, datetime] | None:
     """Read an optional short-lived control override without making it required."""
     if path is None:
         return None
@@ -227,8 +230,19 @@ def _active_demo_mode(path: Path | None, when: datetime) -> str | None:
     if not isinstance(value, Mapping):
         return None
     mode = value.get("mode")
+    expires_at = value.get("expires_at")
     allowed = (*SCHEDULED_MODES, "uploaded-photo")
-    return mode if isinstance(mode, str) and mode in allowed else None
+    if not isinstance(mode, str) or mode not in allowed:
+        return None
+    if not isinstance(expires_at, str):
+        return None
+    try:
+        expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expires.tzinfo is None or expires.utcoffset() is None:
+        return None
+    return mode, expires.astimezone(timezone.utc)
 
 
 def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
@@ -577,7 +591,16 @@ class FrameRuntime:
         requested = canonical_mode(requested_mode)
         if requested != "automatic":
             return requested
-        return canonical_mode(mode_for_time(when, self.config.schedule))
+        return self.resolve_schedule(when).mode
+
+    def resolve_schedule(self, when: datetime) -> ScheduleState:
+        return schedule_state(
+            when,
+            self.config.schedule,
+            latitude=self.config.latitude,
+            longitude=self.config.longitude,
+            timezone_name=self.config.timezone,
+        )
 
     def _control_settings(self, *, fail_closed: bool = False) -> dict[str, Any]:
         loaded = _load_control_overlay(
@@ -587,7 +610,9 @@ class FrameRuntime:
         )
         return _control_values(loaded) if loaded else {}
 
-    def resolve_active_mode(self, when: datetime | None = None) -> str:
+    def resolve_active_state(
+        self, when: datetime | None = None
+    ) -> FrameSelection:
         """Resolve the phone-selected display channel to one concrete mode.
 
         A missing settings file means the safe default, ``automatic``. When a
@@ -600,21 +625,34 @@ class FrameRuntime:
         """
 
         zone = ZoneInfo(self.config.timezone)
-        when = when or datetime.now(zone)
-        when = (
-            when.replace(tzinfo=zone)
-            if when.tzinfo is None
-            else when.astimezone(zone)
+        evaluated = when or datetime.now(timezone.utc)
+        local = (
+            evaluated.replace(tzinfo=zone)
+            if evaluated.tzinfo is None or evaluated.utcoffset() is None
+            else evaluated.astimezone(zone)
         )
+        automatic = self.resolve_schedule(local)
         control = self._control_settings(fail_closed=True)
-        selected = _active_demo_mode(self.config.control_settings_path, when)
+        demo = _active_demo_override(self.config.control_settings_path, local)
+        selected = demo[0] if demo is not None else None
         if selected is None:
             selected = control.get("display_mode")
         if selected is None:
             selected = "automatic"
         if not isinstance(selected, str) or selected not in CANONICAL_MODES:
             raise SourcePolicyError("control display.mode is not a valid canonical mode")
-        return self.resolve_mode(selected, when)
+        mode = automatic.mode if selected == "automatic" else selected
+        next_wake = automatic.next_wake_at
+        if demo is not None and demo[1] < next_wake:
+            next_wake = demo[1]
+        return FrameSelection(
+            mode=mode,
+            evaluated_at=local.astimezone(timezone.utc),
+            next_wake_at=next_wake,
+        )
+
+    def resolve_active_mode(self, when: datetime | None = None) -> str:
+        return self.resolve_active_state(when).mode
 
     def _photo_path(self, control: Mapping[str, Any]) -> Path | None:
         overlay = _overlay_path(

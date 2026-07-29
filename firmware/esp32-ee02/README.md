@@ -2,31 +2,29 @@
 
 This PlatformIO/Arduino project targets a Seeed Studio XIAO ESP32S3 with PSRAM,
 the XIAO ePaper Display Board EE02, and the 13.3-inch T133A01 Spectra 6 panel.
-Every five minutes it checks the headless runtime's virtual `active` frame
-endpoint. The Pi resolves that channel from the validated phone-control
-selection and automatic weather, bird, and star-map schedule. The three user
-buttons wake the board immediately and directly request weather, birds, or the
-star map respectively.
+On each scheduled wake it requests the headless runtime's virtual `active`
+manifest. The Pi resolves that channel from the validated phone-control
+selection and advertises the next absolute schedule deadline: weather at 06:00,
+birds at 09:00, and stars at local sunset plus 30 minutes. The three user
+buttons remain independent wake sources and immediately request fresh weather,
+birds, or star-map manifests respectively.
 
-The EE02's built-in battery divider is sampled once per local day at 06:00.
-The estimate is cached in NVS and written on every physical mode as a small
-handwritten `91/100`-style signature in the bottom-right corner. The firmware
-aligns the last timer wake before 06:00 to that deadline and NTP-corrects its
-retained clock daily. A failed daily NTP request is not repeated every five
-minutes; a clockless first boot backs off for 12 wake cycles. On first
-installation it takes one useful reading immediately; if that happens before
-06:00 it still performs the scheduled reading later that morning.
-Implausible or disconnected-battery readings count as that day's check, so a
-missing pack does not wake the ADC repeatedly; the last valid estimate remains
-cached.
+The EE02's built-in battery divider is sampled once on every timer, button,
+reset, or power-on wake. The fresh voltage estimate is cached in NVS and written
+on every physical mode as a small handwritten `91/100`-style signature in the
+bottom-right corner. One-point percentage jitter is held until the estimate
+moves by at least two points, preventing ADC noise from forcing needless
+full-panel refreshes. An implausible or disconnected-battery reading preserves
+the last valid estimate.
 
 The Pi remains responsible for rendering, rotating, resizing, dithering, and
-encoding the base artwork. Firmware downloads into a second PSRAM buffer and
-verifies HTTP metadata, exact length, SHA-256, and every color nibble. It then
-copies the verified base into `epaper.getPointer()`, adds only the exact-palette
-battery signature, validates the finished buffer again, and calls
-`epaper.update()`. Any network, authentication, allocation, or validation
-failure leaves the physical e-paper image unchanged.
+encoding the base artwork. Firmware always validates the small current manifest
+first and skips the 960,000-byte download when its frame SHA and the displayed
+battery mark are unchanged. Changed frames download into a second PSRAM buffer,
+where exact length, SHA-256, and every color nibble are verified before the
+device adds its exact-palette battery signature and calls `epaper.update()`.
+Any network, allocation, or validation failure leaves the physical image
+unchanged and uses the five-minute safety retry.
 
 ## Configure and build
 
@@ -87,29 +85,33 @@ datasheet curve.
 
 The flow is intentionally small:
 
-1. Power-up, reset, firmware upload, the five-minute timer, or any user button
+1. Power-up, reset, firmware upload, the Pi-scheduled timer, or any user button
    wakes the ESP32. Button 1 selects weather, the middle button selects birds,
    and button 3 selects the star map.
-2. On the first wake at 06:00, GPIO6 briefly enables the EE02 divider. The
-   firmware takes a median of 25 calibrated ADC readings on GPIO1, doubles the
-   divider voltage, estimates a percentage, and switches the divider off.
-3. The board joins Wi-Fi, performs the daily NTP correction when due, and
-   checks the configured frame.
-4. HTTP 304 or a matching SHA-256 skips the slow panel refresh when both the
-   base frame and physically shown battery percentage are unchanged.
-5. A changed base or battery percentage triggers a verified full pull and
-   refresh with the cached handwritten signature.
-6. The ESP32 turns Wi-Fi off and deep-sleeps until the next timer or button
-   wake.
+2. GPIO6 briefly enables the EE02 divider. The firmware takes a median of 25
+   calibrated ADC readings on GPIO1, doubles the divider voltage, updates the
+   estimate, and switches the divider off.
+3. The board joins Wi-Fi and unconditionally requests an updated manifest.
+   Button presses always perform this connection and request, even if their
+   selected artwork is already displayed.
+4. The manifest's frame SHA skips the large download and panel refresh when
+   both artwork and the physically shown battery percentage are unchanged.
+5. A changed base or battery percentage triggers an immutable, content-addressed
+   frame download and verified refresh with the handwritten signature.
+6. The ESP32 subtracts transaction time from the validated Pi deadline, turns
+   Wi-Fi off, and sleeps until that timer or any button. Missing, stale,
+   malformed, or failed schedule responses use a 300-second retry.
 
 The default timer/reset frame channel is `active`. Change `EINK_FRAME_MODE` in
 `include/device_config.h` only if those non-button wakes should follow one
 concrete server frame regardless of the phone-control selection. GPIO 2, 3,
 and 5 are the EE02's active-low user buttons and directly request `weather`,
 `birds`, and `star-map` in that order. A button selection is a one-shot request:
-the next timer wake returns to `active` and the normal automatic/manual web
-selection. Change `EINK_CHECK_INTERVAL_SECONDS` to adjust the default
-300-second timer. The default POSIX timezone is America/Denver
+the next Pi-advertised schedule boundary returns to `active` and the normal
+automatic/manual web selection. A short press made while the ESP is already
+downloading or refreshing is latched and serviced before sleep.
+`EINK_CHECK_INTERVAL_SECONDS` is only the default 300-second failure retry.
+The default POSIX timezone is America/Denver
 (`MST7MDT,M3.2.0,M11.1.0`); override `EINK_TIMEZONE` if the frame moves.
 
 Successful ETag, mode, and SHA-256 state are stored in ESP32 NVS and survive
@@ -118,12 +120,11 @@ panel, firmware commits an invalid NVS marker and only marks the new checksum
 valid after the refresh and state writes complete. A reset during an update
 therefore causes a safe unconditional download on the next wake.
 
-A separate NVS record stores the latest battery millivolts, percentage, and
-local sample date. The physically shown percentage is part of the display
-commit record. If the daily percentage changes while the Pi base checksum does
-not, firmware deliberately omits `If-None-Match`, pulls the full base, and
-rebuilds the signed physical frame. A failed pull retries that cached reading
-on the next wake without sampling the ADC again.
+A separate NVS record stores the latest battery millivolts and percentage. The
+physically shown percentage is part of the display commit record. If the
+stabilized percentage changes while the Pi base checksum does not, firmware
+pulls the immutable base and rebuilds the signed physical frame. Every later
+wake samples again; a failed pull retains the latest valid estimate.
 
 A network, server, or validation error leaves the old image intact and returns
 the board to sleep. Press a button to try again.
@@ -169,7 +170,7 @@ are the hardware references for this target.
   connector polarity, and the EE02 battery switch. The last valid estimate is
   retained; with no valid estimate the signature stays hidden.
 - A noticeably inaccurate charge number while USB is connected: unplug USB,
-  let the cell rest, then wait for the next 06:00 sample. Fit
+  let the cell rest, then press a mode button for a fresh sample. Fit
   `battery_monitor.h` to the chosen cell if tighter accuracy is required.
 - A replacement or externally cleared panel: erase the board's NVS or change
   the frame once so the stored ETag cannot suppress the first refresh.

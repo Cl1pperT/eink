@@ -11,7 +11,7 @@ name = "Denver, Colorado"
 
 [schedule]
 weather_start = "06:00"
-birds_start = "10:00"
+birds_start = "09:00"
 star_start = "20:00"
 
 [conversion]

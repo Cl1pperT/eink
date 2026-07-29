@@ -242,7 +242,7 @@ def _run(args) -> int:
             chunk_size=runtime.config.server_chunk_size,
             max_connections=runtime.config.server_max_connections,
             request_timeout=runtime.config.server_request_timeout,
-            active_mode_resolver=runtime.resolve_active_mode,
+            active_state_resolver=runtime.resolve_active_state,
             log_requests=not args.quiet,
         )
         bound_host, bound_port = server.server_address[:2]

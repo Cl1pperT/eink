@@ -131,18 +131,21 @@ new artwork. The control-panel action writes a fixed-duration UTC sidecar at
 ESP32's physical button to see the selection immediately. Expired, absent, or
 malformed transient state is ignored, so the next device request returns to the
 validated saved mode or automatic schedule. This diagnostic selection is
-unrelated to `render --allow-demo` and cannot publish fixture content.
+unrelated to `render --allow-demo` and cannot publish fixture content. While a
+demo is active, its exact expiry preempts the ordinary schedule deadline in the
+device manifest.
 
 Photo uploads are EXIF-oriented, color-managed to sRGB, and then converted with
 the photo-only `saturation` and `blue_bias` values under `[photo]` in
 `runtime.toml`. This keeps the stronger blue emphasis used by generated artwork
 from tinting camera-roll images.
 
-The installed timers render weather at 05:55, birds at 09:55, and the star map
-at 19:55 in the Pi's local timezone, which should match `location.timezone`.
-Each render starts five minutes before the ESP32's 06:00, 10:00, and 20:00
-display boundary so a newly committed frame is normally ready before the mode
-changes, avoiding an unnecessary refresh of yesterday's frame.
+The installed timers render weather at 05:55, birds at 08:55, and tonight's
+star map at noon in the Pi's local timezone, which should match
+`location.timezone`. Weather activates at 06:00, birds at 09:00, and stars at
+astronomical sunset plus `schedule.star_sunset_offset_minutes` (30 minutes by
+default). The noon star render safely precedes winter sunset while the chart
+itself remains calculated for sunset plus 90 minutes.
 They are persistent across outages and share a lock—with phone-triggered jobs
 using that same lock—so missed or concurrent renders cannot exhaust Pi memory.
 Failed source renders retry at a bounded interval while the previous committed
@@ -242,7 +245,7 @@ The version 1 pull API supports `GET` and `HEAD`:
 | Endpoint | Authentication | Result |
 | --- | --- | --- |
 | `/v1/health` | None | Minimal non-cached liveness response |
-| `/v1/manifest/<mode>` | Bearer token | Atomically committed `current.json` |
+| `/v1/manifest/<mode>` | Bearer token | Validated committed manifest plus dynamic `next_wake_at` |
 | `/v1/frame/<mode>` | Bearer token | EE02 payload referenced by the current manifest |
 | `/v1/frame/<mode>/<sha256>` | Bearer token | Immutable, content-addressed EE02 payload |
 
@@ -250,7 +253,8 @@ The version 1 pull API supports `GET` and `HEAD`:
 It resolves on every request from validated phone settings. An unexpired
 five-minute diagnostic override wins temporarily; otherwise a saved manual
 selection maps directly to its concrete artifact and `automatic` uses the
-configured timezone and schedule. Responses include `X-Resolved-Mode`.
+configured timezone and sunset-aware schedule. Responses include
+`X-Resolved-Mode`.
 Invalid persistent settings or resolver failures receive `503`, invalid or
 expired transient overrides are ignored, and a selected mode with no committed
 artifact receives `404`, so the ESP retains its current image.
@@ -265,11 +269,14 @@ Manifest ETags identify the exact JSON representation. Frame ETags identify
 the EE02 SHA-256. Responses also carry the frame checksum and wire-format
 headers. A client can send `If-None-Match` and receives `304 Not Modified` when
 its entity is current. `Cache-Control: no-cache` means caches may retain a
-response but must revalidate it. General clients can fetch the manifest first
-and then request `/v1/frame/<mode>/<sha256>`. The constrained ESP32 firmware
-uses `/v1/frame/<mode>` directly; that endpoint validates one current manifest
-and opens its exact immutable payload before sending headers, so a concurrent
-render cannot mix metadata and bytes.
+response but must revalidate it. The server dynamically adds an absolute UTC
+`next_wake_at` without modifying the committed `current.json`; matching
+`X-Server-Time`, `X-Next-Wake-At`, and epoch headers let constrained clients
+compute a safe relative sleep without relying on their own clock. The ESP32
+always fetches this small manifest, resolves `active` to its concrete mode, and
+requests `/v1/frame/<mode>/<sha256>` only when the artwork or device-owned
+battery mark changed. This content-addressed sequence cannot mix metadata and
+bytes across a concurrent render.
 
 Before any frame is served, the Pi verifies its exact length, SHA-256, and all
 1,920,000 packed color nibbles. A checksum-valid artifact containing a color
@@ -284,10 +291,9 @@ port 8787 to the public internet. For an untrusted network, bind to
 ## Simulated ESP client
 
 `esp-sync` exercises the same validation, caching, last-known-good, and refresh
-decisions as the firmware. It deliberately uses the more inspectable
-manifest-first form of the protocol, while the memory-constrained firmware
-uses the equivalent current-frame endpoint. Start with a committed frame and
-a running server, then use a second terminal:
+decisions as the firmware. Both use the manifest-first protocol; the hardware
+client additionally consumes the dynamic sleep deadline. Start with a committed
+frame and a running server, then use a second terminal:
 
 ```bash
 export DISPLAY_RUNTIME_AUTH_TOKEN='<the-same-token>'
@@ -299,8 +305,7 @@ Use `--server-url http://<pi-address>:8787` when the simulator is not running
 on the Pi. `--state-dir`, `--timeout`, and `--token-file` override the matching
 configuration or credential source. `esp-sync` requires a concrete mode and
 does not run a clock. Production `automatic` selection stays on the Pi through
-the virtual `active` endpoint. The production firmware's separate NTP-backed
-clock is used only for its once-daily 06:00 battery measurement.
+the virtual `active` endpoint.
 
 The simulated client stores verified, checksum-named payloads under
 `esp_client.state_directory`, plus atomic `state.json` and `display.ee02`
