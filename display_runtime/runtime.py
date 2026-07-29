@@ -54,6 +54,13 @@ CANONICAL_MODES = (
     "test-pattern",
 )
 SCHEDULED_MODES = ("weather", "birds", "star-map")
+STAR_DIRECTION_DEGREES = {
+    "north": 0,
+    "east": 90,
+    "south": 180,
+    "west": 270,
+}
+_DIRECTION_AWARE_STAR_SOURCE = "live inkystarmap/Starplot render"
 
 _ALIASES = {
     "automatic": "automatic",
@@ -194,6 +201,7 @@ def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
     weather = _mapping(settings.get("weather"))
     display = _mapping(settings.get("display"))
     birds = _mapping(settings.get("birds"))
+    stars = _mapping(settings.get("stars"))
     photo = _mapping(settings.get("photo"))
 
     enabled_environments = _first_value(
@@ -283,6 +291,10 @@ def _control_values(settings: Mapping[str, Any]) -> dict[str, Any]:
         "bird_subtitle": _first_value(
             settings.get("bird_subtitle"),
             birds.get("subtitle"),
+        ),
+        "star_direction": _first_value(
+            settings.get("star_direction"),
+            stars.get("direction"),
         ),
         "photo_path": _first_value(settings.get("photo_path"), photo.get("path")),
         "photo_caption": _first_value(settings.get("photo_caption"), photo.get("caption")),
@@ -763,6 +775,10 @@ class FrameRuntime:
         bird_subtitle = control.get("bird_subtitle", "Nearby This Week")
         if not isinstance(bird_subtitle, str) or not bird_subtitle.strip():
             bird_subtitle = "Nearby This Week"
+        direction = STAR_DIRECTION_DEGREES.get(
+            control.get("star_direction"),
+            cfg.direction,
+        )
         return RenderContext(
             orientation=cfg.orientation,
             when=when,
@@ -789,7 +805,7 @@ class FrameRuntime:
                 "dark_starmap": cfg.dark_starmap,
                 "latitude": cfg.latitude,
                 "longitude": cfg.longitude,
-                "direction": cfg.direction,
+                "direction": direction,
                 "timezone": cfg.timezone,
                 "weather_style": cfg.weather_style,
                 "weather_scene_source": cfg.weather_scene_source,
@@ -842,6 +858,7 @@ class FrameRuntime:
         encoded: EncodedEE02Frame,
         rgb_path: Path | None,
         mode_directory: Path,
+        context: RenderContext,
     ) -> dict[str, Any]:
         files: dict[str, Any] = {
             "eink_png": {
@@ -861,7 +878,7 @@ class FrameRuntime:
                 "bytes": rgb_path.stat().st_size,
                 "sha256": _file_sha256(rgb_path),
             }
-        return {
+        manifest = {
             "schema_version": SCHEMA_VERSION,
             "format": "eink-frame-artifacts-v2",
             "mode": mode,
@@ -899,6 +916,27 @@ class FrameRuntime:
                 "conversion_seconds": round(result.conversion_seconds, 6),
             },
         }
+        if (
+            mode == "star-map"
+            and _DIRECTION_AWARE_STAR_SOURCE in result.source_name
+        ):
+            direction_degrees = context.options.get("direction")
+            if (
+                isinstance(direction_degrees, bool)
+                or not isinstance(direction_degrees, int)
+                or not 0 <= direction_degrees < 360
+            ):
+                return manifest
+            cardinal = {
+                0: "N",
+                90: "E",
+                180: "S",
+                270: "W",
+            }.get(direction_degrees)
+            manifest["view"] = {"direction_degrees": direction_degrees}
+            if cardinal is not None:
+                manifest["view"]["direction_cardinal"] = cardinal
+        return manifest
 
     def render(
         self,
@@ -927,6 +965,11 @@ class FrameRuntime:
         current_path = mode_directory / "current.json"
         with _mode_lock(mode_directory):
             source = self.source_factories[mode]()
+            context = self._context(
+                when,
+                allow_demo=not strict,
+                control=control,
+            )
             conversion = (
                 cfg.photo_conversion
                 if mode == "uploaded-photo"
@@ -934,7 +977,7 @@ class FrameRuntime:
             )
             result = ImagePipeline().render(
                 source,
-                self._context(when, allow_demo=not strict, control=control),
+                context,
                 conversion,
                 cfg.fit_mode,
             )
@@ -951,12 +994,26 @@ class FrameRuntime:
             rgb_path = frames_directory / f"{checksum}.rgb.png" if cfg.write_rgb else None
             current = _load_manifest(current_path)
             current_wire_checksum = ((current or {}).get("wire") or {}).get("sha256")
+            current_direction = ((current or {}).get("view") or {}).get(
+                "direction_degrees"
+            )
+            source_applies_direction = (
+                _DIRECTION_AWARE_STAR_SOURCE in result.source_name
+            )
+            direction_changed = (
+                mode == "star-map"
+                and (
+                    current_direction != context.options.get("direction")
+                    if source_applies_direction
+                    else current_direction is not None
+                )
+            )
             frame_valid = _native_file_is_valid(frame_path, checksum, result.eink_image.size)
             wire_valid = _binary_file_is_valid(
                 wire_path, EE02_PAYLOAD_BYTES, encoded.sha256
             )
             rgb_valid = rgb_path is None or rgb_path.is_file()
-            changed = current_wire_checksum != encoded.sha256
+            changed = current_wire_checksum != encoded.sha256 or direction_changed
 
             if not force and not changed and frame_valid and wire_valid and rgb_valid:
                 return RuntimeArtifact(
@@ -998,6 +1055,7 @@ class FrameRuntime:
                 encoded=encoded,
                 rgb_path=rgb_path,
                 mode_directory=mode_directory,
+                context=context,
             )
             _atomic_write_json(manifest, current_path)
             return RuntimeArtifact(

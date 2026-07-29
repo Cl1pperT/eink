@@ -248,6 +248,64 @@ class FrameRuntimeTests(unittest.TestCase):
             self.assertEqual(manifest["source"]["provenance"], "synthetic")
             self.assertFalse(list(config.output_directory.rglob("*.tmp")))
 
+    def test_star_manifest_records_direction_even_when_pixels_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            runtime = FrameRuntime(
+                config,
+                source_factories={
+                    "star-map": lambda: SolidSource(
+                        (10, 20, 40),
+                        "Star Map · live inkystarmap/Starplot render",
+                    )
+                },
+            )
+            when = parse_render_time("2026-07-27T22:00:00", config.timezone)
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "east"},
+            ):
+                east = runtime.render("star-map", when=when, allow_demo=True)
+            east_manifest = json.loads(east.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                east_manifest["view"],
+                {"direction_degrees": 90, "direction_cardinal": "E"},
+            )
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "west"},
+            ):
+                west = runtime.render("star-map", when=when, allow_demo=True)
+            west_manifest = json.loads(west.manifest_path.read_text(encoding="utf-8"))
+            self.assertTrue(west.changed)
+            self.assertTrue(west.written)
+            self.assertEqual(east.wire_checksum, west.wire_checksum)
+            self.assertEqual(
+                west_manifest["view"],
+                {"direction_degrees": 270, "direction_cardinal": "W"},
+            )
+
+            runtime.source_factories["star-map"] = lambda: SolidSource(
+                (10, 20, 40),
+                "Star Map · configured static image",
+            )
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "north"},
+            ):
+                static = runtime.render("star-map", when=when, allow_demo=True)
+            static_manifest = json.loads(
+                static.manifest_path.read_text(encoding="utf-8")
+            )
+            self.assertTrue(static.changed)
+            self.assertNotIn("view", static_manifest)
+
     def test_uploaded_photo_uses_photo_only_conversion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

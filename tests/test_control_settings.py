@@ -57,8 +57,9 @@ class ControlSettingsTests(unittest.TestCase):
             settings = default_settings(catalog)
             self.assertEqual(settings["enabled_locations"], list(catalog.location_ids))
             self.assertEqual(settings["enabled_activities"], list(catalog.activity_ids))
-            self.assertEqual(settings["schema_version"], 2)
+            self.assertEqual(settings["schema_version"], 3)
             self.assertEqual(settings["display"]["mode"], "automatic")
+            self.assertEqual(settings["stars"], {"direction": "south"})
             self.assertEqual(
                 settings["birds"],
                 {
@@ -80,14 +81,38 @@ class ControlSettingsTests(unittest.TestCase):
             legacy["schema_version"] = 1
             legacy["display"].pop("mode")
             legacy.pop("birds")
+            legacy.pop("stars")
             legacy["enabled_locations"] = ["provo_utah"]
             migrated = validate_settings(legacy, catalog)
-            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(migrated["schema_version"], 3)
             self.assertEqual(migrated["enabled_locations"], ["mount_timpanogos"])
             self.assertEqual(migrated["display"]["mode"], "automatic")
             self.assertEqual(migrated["birds"]["postal_code"], "84601")
+            self.assertEqual(migrated["stars"]["direction"], "south")
 
-    def test_invalid_display_mode_and_birdweather_fields_are_rejected(self):
+    def test_v2_settings_gain_default_star_direction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = sample_catalog(Path(directory))
+            legacy = default_settings(catalog)
+            legacy["schema_version"] = 2
+            legacy.pop("stars")
+            migrated = validate_settings(legacy, catalog)
+            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["stars"], {"direction": "south"})
+
+    def test_cardinal_star_directions_are_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = sample_catalog(Path(directory))
+            for direction in ("north", "east", "south", "west"):
+                with self.subTest(direction=direction):
+                    settings = default_settings(catalog)
+                    settings["stars"]["direction"] = direction
+                    self.assertEqual(
+                        validate_settings(settings, catalog)["stars"]["direction"],
+                        direction,
+                    )
+
+    def test_invalid_display_birdweather_and_star_fields_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             catalog = sample_catalog(Path(directory))
             cases = (
@@ -96,6 +121,7 @@ class ControlSettingsTests(unittest.TestCase):
                 (("birds", "postal_code"), "../etc", "postal_code"),
                 (("birds", "country"), "USA", "country"),
                 (("birds", "lookback_days"), 0, "1 to 30"),
+                (("stars", "direction"), "up", "stars.direction"),
             )
             for path, value, message in cases:
                 with self.subTest(path=path):
@@ -145,6 +171,7 @@ class ControlSettingsTests(unittest.TestCase):
             path = root / "state" / "settings.json"
             value = default_settings(catalog)
             value["enabled_locations"] = ["bear_lake"]
+            value["stars"]["direction"] = "east"
             value["activity_overrides"] = {
                 "rock_climbing": {
                     "estimated_great_days": 42,

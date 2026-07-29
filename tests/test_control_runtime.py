@@ -17,7 +17,7 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
         config_path = root / "runtime.toml"
         config_path.write_text(
             '[control]\nsettings = "control.json"\n'
-            '[location]\nname = "Configured location"\n'
+            '[location]\nname = "Configured location"\ndirection = 37\n'
             '[sources]\nphoto = "uploads/latest.png"\n',
             encoding="utf-8",
         )
@@ -48,6 +48,7 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
                 "title": "Avian Visitors",
                 "subtitle": "Nearby Fortnight",
             }
+            value["stars"] = {"direction": "west"}
             value["activity_overrides"] = {
                 "hammocking": {"estimated_great_days": 25}
             }
@@ -70,10 +71,39 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(context.options["bird_lookback_days"], 14)
             self.assertEqual(context.options["bird_title"], "Avian Visitors")
             self.assertEqual(context.options["bird_subtitle"], "Nearby Fortnight")
+            self.assertEqual(context.options["direction"], 270)
             self.assertEqual(
                 context.options["activity_overrides"]["hammocking"]["estimated_great_days"],
                 25,
             )
+
+    def test_persisted_star_directions_map_to_cardinal_bearings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "control.json"
+            catalog = sample_catalog(root)
+            runtime = self._runtime(root, path)
+            expected = {
+                "north": 0,
+                "east": 90,
+                "south": 180,
+                "west": 270,
+            }
+
+            with patch("display_control.settings.discover_catalog", return_value=catalog):
+                for direction, bearing in expected.items():
+                    with self.subTest(direction=direction):
+                        value = default_settings(catalog)
+                        value["stars"]["direction"] = direction
+                        save_settings(path, value, catalog)
+                        control = runtime._control_settings()
+                        context = runtime._context(
+                            datetime(2026, 7, 20, 8),
+                            allow_demo=True,
+                            control=control,
+                        )
+                        self.assertEqual(control["star_direction"], direction)
+                        self.assertEqual(context.options["direction"], bearing)
 
     def test_corrupt_overlay_does_not_replace_trusted_toml_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -88,6 +118,7 @@ class ControlRuntimeIntegrationTests(unittest.TestCase):
             context = runtime._context(datetime(2026, 7, 20, 8), allow_demo=True, control=control)
             self.assertEqual(context.location, "Configured location")
             self.assertIsNone(context.options["enabled_environments"])
+            self.assertEqual(context.options["direction"], 37)
 
     def test_pi_style_photo_path_falls_back_to_runtime_upload_destination(self):
         with tempfile.TemporaryDirectory() as directory:

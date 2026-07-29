@@ -100,7 +100,11 @@ python3 -m playwright install chromium
 Do not install inkystarmap's full Raspberry Pi package on the Mac solely for the
 simulator: its module initializes `inky.auto()` at import time. The adapter uses
 the same `HorizonPlot`, style, constellation, magnitude, planet, moon, and field-
-of-view settings while keeping that hardware module out of the process.
+of-view settings while keeping that hardware module out of the process. Stars
+are colored from their catalogued B-V temperature index, while visible planets
+use enlarged not-to-scale, individually colored markers with recognizable
+details such as Saturn's ring. A red ecliptic and six-pigment-aware sky styling
+make those additions survive the physical display conversion cleanly.
 
 The central conversion is ported from the weather fork's `weather_frame/eink.py`
 and mirrors the Pimoroni EL133UF1 driver's saturation-interpolated matching

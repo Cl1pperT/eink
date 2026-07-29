@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DISPLAY_MODES = (
     "automatic",
     "weather",
@@ -26,6 +26,7 @@ DISPLAY_MODES = (
     "star-map",
     "uploaded-photo",
 )
+STAR_DIRECTIONS = ("north", "east", "south", "west")
 RANGE_FIELDS = (
     "tolerable_min",
     "ideal_min",
@@ -311,6 +312,9 @@ def default_settings(catalog: Catalog) -> dict[str, Any]:
             "title": "Avian Visitors",
             "subtitle": "Nearby This Week",
         },
+        "stars": {
+            "direction": "south",
+        },
         "photo": {
             "caption": "",
             "rotation": 0,
@@ -444,16 +448,18 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
         "activity_overrides",
         "display",
         "birds",
+        "stars",
         "photo",
     }
     _reject_unknown(data, allowed, "settings")
     defaults = default_settings(catalog)
-    # Version 1 is migrated in memory by filling the v2 display-mode and
-    # BirdWeather fields from defaults. The next successful save persists v2.
+    # Older settings are migrated in memory by filling later display,
+    # BirdWeather, and star-map fields from defaults. The next successful save
+    # persists the current schema.
     version = data.get("schema_version", 1)
-    if isinstance(version, bool) or version not in (1, SCHEMA_VERSION):
+    if isinstance(version, bool) or version not in (1, 2, SCHEMA_VERSION):
         raise SettingsValidationError(
-            f"Unsupported schema_version {version!r}; expected 1 or {SCHEMA_VERSION}"
+            f"Unsupported schema_version {version!r}; expected 1, 2, or {SCHEMA_VERSION}"
         )
     location_value = data.get("enabled_locations", defaults["enabled_locations"])
     if version == 1 and isinstance(location_value, list):
@@ -551,6 +557,14 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
         allow_empty=False,
     )
 
+    stars = _expect_mapping(data.get("stars", defaults["stars"]), "stars")
+    _reject_unknown(stars, {"direction"}, "stars")
+    star_direction = stars.get("direction", defaults["stars"]["direction"])
+    if star_direction not in STAR_DIRECTIONS:
+        raise SettingsValidationError(
+            "stars.direction must be north, east, south, or west"
+        )
+
     photo = _expect_mapping(data.get("photo", defaults["photo"]), "photo")
     _reject_unknown(photo, {"caption", "rotation", "enabled"}, "photo")
     photo_caption = _short_string(
@@ -583,6 +597,9 @@ def validate_settings(value: Any, catalog: Catalog) -> dict[str, Any]:
             "lookback_days": lookback_days,
             "title": bird_title,
             "subtitle": bird_subtitle,
+        },
+        "stars": {
+            "direction": star_direction,
         },
         "photo": {
             "caption": photo_caption,

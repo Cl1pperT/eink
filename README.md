@@ -56,6 +56,12 @@ collage, the morning weather renderer from
 hosts an optional LAN photo-upload page. Every source passes through the weather
 fork's EL133UF1-compatible Spectra 6 conversion pipeline.
 
+The live star map uses catalogued B-V values to distinguish hot blue, neutral
+white, Sun-like gold, and cool red stars. It also draws a red ecliptic, green
+constellation geometry, a palette-optimized twilight horizon, and enlarged
+not-to-scale planet miniatures with individual colors and silhouettes (including
+Saturn's rings).
+
 When those projects are checked out at `peacock/AvianVisitors` and
 `stars/integrations/inkystarmap`, the simulator and checkout-based headless CLI
 discover them relative to this source tree. No repository selection in the UI
@@ -78,6 +84,11 @@ manages locations and activity recommendations, and turns phone photo uploads
 into color-managed, photo-tuned committed frames. Its Birds tab includes a
 compact current-frame preview and a full responsive `/birds` gallery backed by
 cached, regional BirdWeather reports and the local AvianVisitors illustrations.
+Its Stars tab safely previews the latest committed sky frame and persists a
+North, East, South, or West center direction for scheduled and manual renders.
+**Save & render tonight's sky** saves that choice and creates a new committed
+star frame. The read-only `/api/stars/summary` and `/api/stars/preview` routes
+expose only manifest-validated committed metadata and artwork.
 From the development checkout, start it with:
 
 ```bash
@@ -95,13 +106,13 @@ the Pi they persist in `/var/lib/eink-display/control/settings.json`, separate
 from the root-owned runtime configuration. Do not forward port 8765 from your
 router; it is intended for a trusted home LAN.
 
-The Overview page also has a diagnostic **Five-minute demo** for Weather,
-Birds, Stars, or the uploaded Image. It temporarily points the virtual
-`active` channel at the latest committed artwork without changing the saved
-display mode. Press the frame's physical button to fetch it immediately. At
-expiry, the next button press or automatic ESP check resumes the saved manual
-mode or automatic schedule. This override never enables fixture/demo artwork;
-it only selects an already committed production frame.
+The Overview page and Stars tab also provide a diagnostic **Five-minute demo**
+for Weather, Birds, Stars, or the uploaded Image. It selects the latest
+committed artwork without rendering or changing the saved display mode. Press
+the frame's physical button to fetch it immediately. At expiry, the next button
+press or automatic ESP check resumes the saved manual mode or automatic
+schedule. This override never enables fixture/demo artwork; it only selects an
+already committed production frame.
 
 BirdWeather is a regional view of reports from nearby stations. Without a
 microphone attached to this frame it intentionally does not describe those

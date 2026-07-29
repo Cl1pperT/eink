@@ -1,6 +1,6 @@
 # Optional real-project adapters. Keep these separate from the core macOS GUI.
 playwright>=1.45
-starplot>=0.16.1
+starplot>=0.20.4,<0.21
 astral>=3.2
 pytz>=2025.2
 pyarrow>=20,<21

@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from datetime import datetime
+import importlib.util
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,8 +8,25 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from PIL import Image, ImageColor
+
 from display_simulator.models import Orientation, RenderContext
+from display_simulator.models import ConversionSettings
+from display_simulator.pipeline import SPECTRA_PALETTE, convert_to_spectra
 from display_simulator.sources import BirdsSource, StarMapSource, TestPatternSource, WeatherSource
+from display_simulator.sources.starmap import (
+    _INK_BLACK,
+    _INK_BLUE,
+    _INK_GREEN,
+    _INK_RED,
+    _INK_WHITE,
+    _INK_YELLOW,
+    _PLANET_VISUALS,
+    _colorful_plot_style,
+    _fit_full_sky,
+    _plot_colorful_planets,
+    _stellar_color,
+)
 from display_simulator.avian_capture import DEMO_SPECIES
 
 
@@ -86,6 +104,177 @@ class SourceTests(unittest.TestCase):
 
     def test_starmap_forces_offscreen_matplotlib_backend(self):
         self.assertEqual(os.environ.get("MPLBACKEND"), "Agg")
+
+    def test_offline_starmap_exercises_every_display_color(self):
+        with without_external_repositories():
+            image = StarMapSource().render(self.context)
+        pixels = (
+            image.get_flattened_data()
+            if hasattr(image, "get_flattened_data")
+            else image.getdata()
+        )
+        colors = set(pixels)
+        expected = {
+            ImageColor.getrgb(color)
+            for color in (
+                _INK_BLACK,
+                _INK_WHITE,
+                _INK_YELLOW,
+                _INK_RED,
+                _INK_BLUE,
+                _INK_GREEN,
+            )
+        }
+        self.assertTrue(expected.issubset(colors))
+
+    def test_stellar_colors_follow_catalogued_temperature(self):
+        cases = (
+            (-0.2, _INK_BLUE),
+            (0.24, _INK_BLUE),
+            (0.25, _INK_WHITE),
+            (0.64, _INK_WHITE),
+            (0.65, _INK_YELLOW),
+            (1.19, _INK_YELLOW),
+            (1.2, _INK_RED),
+            (float("nan"), _INK_WHITE),
+            (None, _INK_WHITE),
+        )
+        for bv, expected in cases:
+            with self.subTest(bv=bv):
+                self.assertEqual(_stellar_color(SimpleNamespace(bv=bv)), expected)
+        self.assertEqual(_stellar_color(SimpleNamespace()), _INK_WHITE)
+
+    def test_planet_visuals_cover_every_supported_world(self):
+        expected = {
+            "mercury", "venus", "mars", "jupiter",
+            "saturn", "uranus", "neptune", "pluto",
+        }
+        self.assertEqual(set(_PLANET_VISUALS), expected)
+        self.assertIn("ring_size", _PLANET_VISUALS["saturn"])
+        self.assertNotIn("ring_size", _PLANET_VISUALS["jupiter"])
+        for name, visual in _PLANET_VISUALS.items():
+            with self.subTest(planet=name):
+                self.assertGreaterEqual(visual["size"], 40)
+                self.assertEqual(visual["label"], _INK_WHITE)
+                self.assertNotEqual(visual["symbol"], "circle_line")
+                self.assertIn(
+                    visual["fill"],
+                    {_INK_BLACK, _INK_WHITE, _INK_YELLOW, _INK_RED, _INK_BLUE, _INK_GREEN},
+                )
+
+    def test_colored_planets_plot_only_visible_worlds_and_layer_saturns_ring(self):
+        class Style:
+            def __init__(self, **values):
+                self.values = values
+
+        class Planets:
+            @staticmethod
+            def all(_observer, _ephemeris):
+                return iter(
+                    (
+                        SimpleNamespace(name="Mars", ra=1, dec=1),
+                        SimpleNamespace(name=SimpleNamespace(value="saturn"), ra=2, dec=1),
+                        SimpleNamespace(name="Neptune", ra=3, dec=-1),
+                    )
+                )
+
+        class Plot:
+            observer = object()
+            ephemeris_name = "test.bsp"
+
+            def __init__(self):
+                self.calls = []
+
+            @staticmethod
+            def in_bounds(_ra, dec):
+                return dec >= 0
+
+            def marker(self, ra, dec, **values):
+                self.calls.append((ra, dec, values))
+
+        plot = Plot()
+        visible = _plot_colorful_planets(
+            plot,
+            Planets,
+            Style,
+            Style,
+            Style,
+        )
+
+        self.assertEqual(visible, ("mars", "saturn"))
+        self.assertEqual(len(plot.calls), 3)
+        labels = [call[2].get("label") for call in plot.calls]
+        self.assertEqual(labels, ["MARS", None, "SATURN"])
+        saturn_ring = plot.calls[1][2]["style"].values["marker"].values
+        self.assertEqual(saturn_ring["symbol"], "ellipse")
+        self.assertGreater(saturn_ring["size"], _PLANET_VISUALS["saturn"]["size"])
+        self.assertTrue(all(call[2]["legend_label"] is None for call in plot.calls))
+
+    def test_full_sky_fit_preserves_both_horizontal_edges(self):
+        source = Image.new("RGB", (700, 400), _INK_BLACK)
+        source.paste(ImageColor.getrgb(_INK_RED), (0, 0, 60, 400))
+        source.paste(ImageColor.getrgb(_INK_BLUE), (640, 0, 700, 400))
+
+        fitted, bounds = _fit_full_sky(source, (400, 300))
+
+        self.assertEqual(fitted.size, (400, 300))
+        self.assertEqual(bounds[0], 0)
+        self.assertEqual(bounds[2], 400)
+        pixels = (
+            fitted.get_flattened_data()
+            if hasattr(fitted, "get_flattened_data")
+            else fitted.getdata()
+        )
+        colors = set(pixels)
+        self.assertIn(ImageColor.getrgb(_INK_RED), colors)
+        self.assertIn(ImageColor.getrgb(_INK_BLUE), colors)
+
+    @unittest.skipUnless(importlib.util.find_spec("starplot"), "Starplot is optional")
+    def test_colorful_styles_construct_with_supported_starplot_api(self):
+        from starplot.styles import LabelStyle, MarkerStyle, ObjectStyle, PlotStyle, extensions
+
+        style = _colorful_plot_style(PlotStyle, extensions)
+        self.assertEqual(style.constellation_lines.color.as_hex(), _INK_GREEN)
+        for name, visual in _PLANET_VISUALS.items():
+            with self.subTest(planet=name):
+                marker = MarkerStyle(
+                    color=visual["fill"],
+                    edge_color=visual["edge"],
+                    edge_width=3.5,
+                    symbol=visual["symbol"],
+                    size=visual["size"],
+                    fill="full",
+                    zorder=1500,
+                )
+                ObjectStyle(marker=marker, label=LabelStyle())
+
+    def test_star_art_source_colors_map_to_clean_individual_pigments(self):
+        source_colors = (
+            _INK_BLACK,
+            _INK_WHITE,
+            _INK_YELLOW,
+            _INK_RED,
+            _INK_BLUE,
+            _INK_GREEN,
+        )
+        settings = ConversionSettings(
+            dither=True,
+            dither_method="floyd-steinberg",
+            saturation=0.6,
+            blue_bias=0.5,
+        )
+        for source, expected in zip(source_colors, SPECTRA_PALETTE):
+            with self.subTest(source=source):
+                converted = convert_to_spectra(
+                    Image.new("RGB", (64, 64), ImageColor.getrgb(source)),
+                    settings,
+                )
+                pixels = (
+                    converted.get_flattened_data()
+                    if hasattr(converted, "get_flattened_data")
+                    else converted.getdata()
+                )
+                self.assertEqual(set(pixels), {expected})
 
     def test_avian_viewer_uses_native_horizontal_viewport(self):
         commands = []

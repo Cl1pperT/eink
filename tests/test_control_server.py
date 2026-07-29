@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import http.client
 import io
 import json
@@ -96,6 +97,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(b'<meta name="viewport"', body)
         self.assertIn(b"Activities", body)
         self.assertIn(b"Nearby birds", body)
+        self.assertIn(b'id="panel-stars"', body)
+        self.assertIn(b'id="render-stars"', body)
+        self.assertEqual(body.count(b"data-star-direction="), 4)
         self.assertIn(b'id="display-mode"', body)
         self.assertIn(b"Five-minute demo", body)
         self.assertEqual(body.count(b"data-demo-mode="), 4)
@@ -117,15 +121,26 @@ class ControlServerTests(unittest.TestCase):
         preview = mode / "frames" / frame_name
         preview.parent.mkdir(parents=True)
         Image.new("RGB", (24, 18), "white").save(preview)
+        preview_payload = preview.read_bytes()
+        preview_digest = hashlib.sha256(preview_payload).hexdigest()
         (mode / "current.json").write_text(
             json.dumps(
                 {
+                    "schema_version": 2,
+                    "format": "eink-frame-artifacts-v2",
                     "mode": "birds",
                     "generated_at": "2026-07-27T12:00:00+00:00",
+                    "rendered_for": "2026-07-27T11:55:00+00:00",
+                    "dimensions": {"width": 24, "height": 18},
+                    "pixel_checksum": {
+                        "algorithm": "sha256-dimensions-rgb-v1",
+                        "value": "b" * 64,
+                    },
                     "files": {
                         "rgb_png": {
                             "path": f"frames/{frame_name}",
-                            "sha256": "a" * 64,
+                            "bytes": len(preview_payload),
+                            "sha256": preview_digest,
                         }
                     },
                 }
@@ -165,11 +180,19 @@ class ControlServerTests(unittest.TestCase):
         (mode / "current.json").write_text(
             json.dumps(
                 {
+                    "schema_version": 2,
+                    "format": "eink-frame-artifacts-v2",
                     "mode": "birds",
+                    "dimensions": {"width": 24, "height": 18},
+                    "pixel_checksum": {
+                        "algorithm": "sha256-dimensions-rgb-v1",
+                        "value": "b" * 64,
+                    },
                     "files": {
                         "rgb_png": {
                             "path": "../../etc/passwd",
-                            "sha256": "a" * 64,
+                            "bytes": len(preview_payload),
+                            "sha256": preview_digest,
                         }
                     },
                 }
@@ -177,6 +200,69 @@ class ControlServerTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(self.request("GET", "/api/birds/preview")[0], 404)
+
+    def test_star_summary_and_preview_report_the_committed_cardinal_view(self):
+        mode = self.root / "frames" / "star-map"
+        pixel_identity = "c" * 64
+        preview = mode / "frames" / f"{pixel_identity}.png"
+        preview.parent.mkdir(parents=True)
+        Image.new("RGB", (40, 30), (20, 35, 80)).save(preview)
+        payload = preview.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        (mode / "current.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "format": "eink-frame-artifacts-v2",
+                    "mode": "star-map",
+                    "generated_at": "2026-07-27T12:00:00+00:00",
+                    "rendered_for": "2026-07-27T21:30:00-06:00",
+                    "dimensions": {"width": 40, "height": 30},
+                    "pixel_checksum": {
+                        "algorithm": "sha256-dimensions-rgb-v1",
+                        "value": pixel_identity,
+                    },
+                    "view": {
+                        "direction_degrees": 90,
+                        "direction_cardinal": "E",
+                    },
+                    "files": {
+                        "eink_png": {
+                            "path": f"frames/{pixel_identity}.png",
+                            "bytes": len(payload),
+                            "sha256": digest,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status, _headers, body = self.request("GET", "/api/stars/summary")
+        self.assertEqual(status, 200)
+        summary = json.loads(body)
+        self.assertTrue(summary["preview_available"])
+        self.assertEqual(summary["preview_etag"], digest)
+        self.assertEqual(summary["rendered_direction"], "E")
+        self.assertEqual(summary["rendered_for"], "2026-07-27T21:30:00-06:00")
+
+        status, headers, body = self.request("GET", "/api/stars/preview")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, payload)
+        self.assertEqual(headers["ETag"], f'"{digest}"')
+        self.assertEqual(headers["X-EInk-Generated-At"], "2026-07-27T12:00:00+00:00")
+        status, _headers, body = self.request(
+            "GET",
+            "/api/stars/preview",
+            headers={"If-None-Match": f'"{digest}"'},
+        )
+        self.assertEqual(status, 304)
+        self.assertEqual(body, b"")
+
+        manifest = json.loads((mode / "current.json").read_text(encoding="utf-8"))
+        manifest["files"]["eink_png"]["sha256"] = "d" * 64
+        (mode / "current.json").write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertEqual(self.request("GET", "/api/stars/preview")[0], 404)
 
     def test_mutations_require_token_and_invalid_state_is_not_saved(self):
         settings = default_settings(self.catalog)

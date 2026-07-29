@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from datetime import datetime
+import hashlib
 import hmac
 import io
 import json
@@ -11,6 +14,7 @@ import queue
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -46,7 +50,6 @@ MAX_PREVIEW_BYTES = 40 * 1024 * 1024
 MAX_ILLUSTRATION_BYTES = 16 * 1024 * 1024
 RENDERABLE_MODES = DEMO_MODES
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_BIRD_PNG_RE = re.compile(r"frames/[0-9a-f]{64}(?:\.rgb)?\.png")
 _BIRD_SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?")
 
 INDEX_HTML = r"""<!doctype html>
@@ -74,6 +77,7 @@ INDEX_HTML = r"""<!doctype html>
       <button class="tab active" data-tab="overview" aria-selected="true"><span>⌒</span>Overview</button>
       <button class="tab" data-tab="locations" aria-selected="false"><span>△</span>Locations</button>
       <button class="tab" data-tab="activities" aria-selected="false"><span>☼</span>Activities</button>
+      <button class="tab" data-tab="stars" aria-selected="false"><span>✦</span>Stars</button>
       <button class="tab" data-tab="birds" aria-selected="false"><span>♩</span>Birds</button>
       <button class="tab" data-tab="photo" aria-selected="false"><span>▣</span>Photo</button>
     </nav>
@@ -153,6 +157,34 @@ INDEX_HTML = r"""<!doctype html>
       <div id="activity-empty" class="empty hidden">No activities match that search.</div>
     </section>
 
+    <section id="panel-stars" class="panel" aria-labelledby="stars-title">
+      <div class="section-heading"><div><p class="eyebrow">Tonight overhead</p><h2 id="stars-title">Star map</h2><p>Choose the horizon you want centered, render the current sky, then press the frame button when you are ready to display it.</p></div></div>
+      <article class="card star-mini">
+        <div class="star-preview-shell">
+          <img id="star-frame-preview" class="hidden" alt="Latest star map artwork rendered for the e-ink frame">
+          <div id="star-preview-empty" class="star-preview-empty"><span>✦</span><p>The first rendered star map will appear here.</p></div>
+        </div>
+        <div class="star-mini-copy">
+          <div class="card-title"><div><p class="eyebrow">Committed frame</p><h3>Latest night sky</h3></div><span id="star-freshness" class="freshness loading">Loading</span></div>
+          <p id="star-source-copy" class="muted">Checking the latest saved star map…</p>
+          <div class="direction-field">
+            <span class="direction-label">Center the view</span>
+            <div class="compass-picker" role="group" aria-label="Star map viewing direction">
+              <button type="button" data-star-direction="north" aria-pressed="false"><b>N</b><small>North</small></button>
+              <button type="button" data-star-direction="east" aria-pressed="false"><b>E</b><small>East</small></button>
+              <button type="button" data-star-direction="south" aria-pressed="false"><b>S</b><small>South</small></button>
+              <button type="button" data-star-direction="west" aria-pressed="false"><b>W</b><small>West</small></button>
+            </div>
+          </div>
+          <div class="star-actions">
+            <button id="render-stars" class="inline-primary" type="button">Save &amp; render tonight’s sky</button>
+            <button id="demo-stars" class="outline-button" type="button" disabled>Show for five minutes</button>
+          </div>
+          <p class="helper">Each map spans a 180° horizon centered on your choice and uses the frame location and current local time. “Show for five minutes” still requires a physical frame-button press.</p>
+        </div>
+      </article>
+    </section>
+
     <section id="panel-birds" class="panel" aria-labelledby="birds-title">
       <div class="section-heading"><div><p class="eyebrow">Regional field notes</p><h2 id="birds-title">Nearby birds</h2><p>A phone-sized window into illustrated BirdWeather reports near your postal code.</p></div></div>
       <article class="card bird-mini">
@@ -203,7 +235,7 @@ INDEX_HTML = r"""<!doctype html>
     <button id="discard" class="secondary-button">Discard</button>
     <button id="save" class="primary-button">Save to frame</button>
   </div>
-  <footer><button id="reset" class="danger-link">Restore all defaults</button><span>Control panel v2</span></footer>
+  <footer><button id="reset" class="danger-link">Restore all defaults</button><span>Control panel v3</span></footer>
   <div id="toast" class="toast hidden" role="status"></div>
 </body>
 </html>"""
@@ -212,11 +244,12 @@ APP_CSS = r"""
 :root{--ink:#16312c;--forest:#1d5145;--sage:#7d9a78;--mint:#dbe8dc;--paper:#f7f3e9;--white:#fffdf8;--sun:#e7ad52;--red:#a74e3c;--line:#d8d8c8;--shadow:0 10px 34px rgba(31,58,47,.10);font-family:Inter,ui-rounded,"SF Pro Rounded",system-ui,-apple-system,sans-serif;color:var(--ink);background:var(--paper);font-synthesis:none}
 *{box-sizing:border-box}body{margin:0;min-width:320px;background:radial-gradient(circle at 95% 4%,#e3d6ae88 0,transparent 25rem),linear-gradient(180deg,#eef3e9 0,var(--paper) 24rem);min-height:100vh}button,input,select{font:inherit;color:inherit}.hero{max-width:1040px;margin:auto;padding:calc(22px + env(safe-area-inset-top)) 22px 18px;display:flex;align-items:center;gap:13px}.brand-mark{width:45px;height:45px;border-radius:15px;background:var(--forest);color:white;display:grid;place-items:center;font-size:26px;box-shadow:0 7px 18px #1d514533}.hero-copy{flex:1}.hero h1,.section-heading h2,.card h3{margin:0;line-height:1.1}.hero h1{font-size:clamp(24px,6vw,34px);letter-spacing:-.04em}.eyebrow{text-transform:uppercase;font-size:10px;letter-spacing:.15em;font-weight:800;color:#6b7e68;margin:0 0 5px}.pill{border:1px solid #b8c8b7;background:#ffffffb3;padding:8px 11px;border-radius:99px;font-size:12px;font-weight:750;white-space:nowrap}.pill i,.save-bar i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:#d7a12e}.pill.online i{background:#4b9a65}.pill.offline i{background:var(--red)}main{max-width:1040px;margin:auto;padding:0 18px 130px}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:5px;border:1px solid #dce1d5;background:#f9fbf5cc;backdrop-filter:blur(12px);border-radius:17px;position:sticky;top:8px;z-index:10;box-shadow:0 3px 18px #28482c0a}.tab{appearance:none;border:0;background:transparent;border-radius:12px;padding:10px 4px;color:#6c7a6e;font-size:11px;font-weight:700;cursor:pointer}.tab span{display:block;font-size:19px;height:23px}.tab.active{background:var(--forest);color:#fff;box-shadow:0 4px 12px #214c4133}.panel{display:none;animation:fade .2s ease}.panel.active{display:block}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:30px 3px 18px}.section-heading h2{font-family:Georgia,serif;font-weight:500;font-size:clamp(27px,7vw,38px);letter-spacing:-.03em}.section-heading p:not(.eyebrow){color:#69776d;line-height:1.45;margin:8px 0 0;max-width:640px}.icon-button{border:1px solid var(--line);background:var(--white);border-radius:50%;width:43px;height:43px;font-size:22px;cursor:pointer}.card,.stat,.location-card,.activity-item{background:rgba(255,253,248,.94);border:1px solid rgba(130,143,118,.23);border-radius:21px;box-shadow:var(--shadow)}.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}.stat{padding:17px 14px;min-width:0}.stat strong{display:block;font-size:25px;margin:10px 0 2px;letter-spacing:-.04em}.stat small{color:#728074;display:block;line-height:1.2}.stat-icon{width:32px;height:32px;display:grid;place-items:center;border-radius:10px;background:#e8eee4;color:var(--forest);font-size:18px}.stat-icon.sun{background:#f7e7c4;color:#a66b15}.stat-icon.photo{background:#e7e4ef;color:#645b7a}.card{padding:20px;margin:14px 0}.card.compact{padding:17px}.card-title{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px}.card h3{font-size:19px}.success-dot{width:10px;height:10px;border-radius:50%;background:#5b9d68;box-shadow:0 0 0 6px #5b9d6818}.field-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px}.field{display:flex;flex-direction:column;gap:7px;font-size:13px;font-weight:750}.field.span-2{grid-column:span 2}.field input:not([type=range]),.field select,.search{width:100%;border:1px solid #ccd4c8;background:#fff;border-radius:12px;min-height:47px;padding:10px 12px;outline:none}.field input:focus,.field select:focus,.search:focus-within{border-color:#5e887a;box-shadow:0 0 0 3px #5385741b}.field output{float:right;color:var(--forest)}input[type=range]{accent-color:var(--forest);width:100%;height:28px}.switch-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:4px 0}.switch-row span{display:flex;flex-direction:column;gap:3px}.switch-row small,.helper,.muted,.file-name{color:#728074;line-height:1.45}.switch-row input[type=checkbox]{appearance:none;width:48px;height:28px;border-radius:99px;background:#cbd1c8;position:relative;transition:.2s;flex:none}.switch-row input[type=checkbox]::after{content:"";position:absolute;width:22px;height:22px;left:3px;top:3px;border-radius:50%;background:#fff;box-shadow:0 2px 5px #0003;transition:.2s}.switch-row input:checked{background:var(--forest)}.switch-row input:checked::after{transform:translateX(20px)}.field-switch{align-self:end;min-height:47px}.helper{font-size:12px;margin:15px 0 0;border-left:3px solid #d6bd7b;padding-left:11px}.location-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.location-card{position:relative;overflow:hidden;cursor:pointer;min-height:190px;display:flex;flex-direction:column;justify-content:flex-end;padding:18px;isolation:isolate;transition:.18s}.location-card::before{content:"";position:absolute;inset:0;z-index:-2;background:linear-gradient(160deg,var(--scene-a),var(--scene-b))}.location-card::after{content:"";position:absolute;z-index:-1;inset:42% -12% -23%;background:var(--mountain);clip-path:polygon(0 58%,15% 30%,31% 57%,47% 8%,65% 45%,80% 24%,100% 53%,100% 100%,0 100%);opacity:.68}.location-card input{position:absolute;right:14px;top:14px;width:25px;height:25px;accent-color:var(--forest)}.location-card h3{margin:0 38px 4px 0;font-size:19px}.location-card p{font-size:12px;line-height:1.35;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.location-card.selected{outline:3px solid var(--forest);outline-offset:-3px}.location-card:not(.selected){filter:saturate(.55);opacity:.68}.location-card .art-badge{position:absolute;left:14px;top:14px;font-size:10px;font-weight:800;padding:5px 7px;border-radius:99px;background:#ffffffb8}.activity-toolbar{display:flex;align-items:center;gap:12px;position:sticky;top:83px;z-index:8}.search{display:flex;align-items:center;gap:8px;flex:1;min-height:44px;padding:6px 11px}.search input{border:0;outline:0;background:transparent;width:100%}.text-button{border:0;background:transparent;color:var(--forest);font-weight:800;padding:9px 7px;cursor:pointer}.list-summary{font-size:12px;color:#728074;margin:15px 4px 9px}.activity-list{display:grid;gap:10px}.activity-item{overflow:hidden}.activity-head{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:15px}.activity-toggle{width:23px;height:23px;accent-color:var(--forest)}.activity-title b{display:block}.activity-title small{color:#748075}.art-chip{font-size:10px;background:#e8eee4;color:#346051;padding:5px 7px;border-radius:99px;font-weight:800}.activity-item details{border-top:1px solid #e5e7dd}.activity-item summary{list-style:none;padding:12px 15px;cursor:pointer;color:var(--forest);font-size:12px;font-weight:800}.activity-item summary::-webkit-details-marker{display:none}.activity-item summary::after{content:"+";float:right;font-size:18px;line-height:12px}.activity-item details[open] summary::after{content:"−"}.activity-editor{padding:4px 15px 18px}.days-row{display:grid;grid-template-columns:1fr 100px;align-items:end;gap:10px;margin-bottom:15px}.metric-table{overflow-x:auto;border:1px solid #e0e3d9;border-radius:13px}.metric-head,.metric-row{display:grid;grid-template-columns:minmax(122px,1.5fr) repeat(5,minmax(66px,.7fr)) 62px;align-items:center;min-width:580px}.metric-head{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:#718075;background:#f1f3ec;padding:8px}.metric-row{border-top:1px solid #e5e7df;padding:8px;background:#fff}.metric-row:first-of-type{border-top:0}.metric-name{font-size:11px;font-weight:750}.metric-row input[type=number]{width:60px;border:1px solid #d8ddd3;border-radius:8px;padding:7px 5px;font-size:12px}.metric-required{text-align:center}.metric-required input{width:18px;height:18px;accent-color:var(--forest)}.restore-activity{margin-top:12px}.photo-card{text-align:center}.photo-preview{aspect-ratio:4/3;border-radius:15px;overflow:hidden;background:#e9ece4;display:grid;place-items:center;margin-bottom:16px;border:1px dashed #b9c2b5}.photo-preview img{width:100%;height:100%;object-fit:cover}.empty-preview span{font-size:37px;color:#788b79}.empty-preview p{margin:-25% 0 0;color:#718074;font-size:13px}.upload-button{display:flex;justify-content:center;align-items:center;gap:9px;background:var(--forest);color:#fff;border-radius:13px;padding:13px;cursor:pointer}.upload-button span{font-size:20px}.file-name{font-size:12px;margin:10px 0 0}.photo-fields{margin-top:18px;padding-top:17px;border-top:1px solid #e4e6dc}.notice{border-radius:13px;padding:13px 15px;background:#e6eee2;color:#315742}.notice.error{background:#f6e2dc;color:#7f372a}.loading-card,.empty{text-align:center;padding:50px 20px;color:#68766b}.spinner{display:inline-block;width:24px;height:24px;border:3px solid #cfdbcd;border-top-color:var(--forest);border-radius:50%;animation:spin .8s linear infinite}.save-bar{position:fixed;z-index:20;bottom:calc(12px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(calc(100% - 24px),720px);background:#173b35;color:#fff;border-radius:18px;padding:10px 11px 10px 16px;display:flex;align-items:center;gap:9px;box-shadow:0 15px 35px #102e2770}.save-bar span{margin-right:auto;font-size:13px}.save-bar i{background:var(--sun)}.primary-button,.secondary-button{border:0;border-radius:11px;padding:10px 13px;font-weight:800;cursor:pointer}.primary-button{background:#fff;color:var(--forest)}.secondary-button{background:#ffffff18;color:#fff}.danger-link{border:0;background:transparent;color:#9b5546;font-weight:700;cursor:pointer}footer{max-width:1040px;margin:-92px auto 0;padding:20px 20px calc(30px + env(safe-area-inset-bottom));display:flex;justify-content:space-between;color:#899287;font-size:11px}.toast{position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:50;background:#173b35;color:#fff;border-radius:12px;padding:11px 16px;box-shadow:var(--shadow);font-size:13px}.hidden{display:none!important}@keyframes spin{to{transform:rotate(360deg)}}@keyframes fade{from{opacity:0;transform:translateY(4px)}}
 .location-card.scene-0{--scene-a:#b9d7d4;--scene-b:#728b68;--mountain:#4b6952}.location-card.scene-1{--scene-a:#efc18c;--scene-b:#be674a;--mountain:#71423a}.location-card.scene-2{--scene-a:#e9b598;--scene-b:#a95842;--mountain:#6e473e}.location-card.scene-3{--scene-a:#bdd7dc;--scene-b:#728d87;--mountain:#496c63}.location-card.scene-4{--scene-a:#a8d9d6;--scene-b:#789a91;--mountain:#4b7068}.toast.error{background:#843c31}
-.tabs{grid-template-columns:repeat(5,1fr)}.card-title{gap:12px}.render-row{display:flex;align-items:center;gap:16px;margin-top:17px;padding-top:15px;border-top:1px solid #e4e6dc}.render-row p{margin:0;flex:1;font-size:12px}.inline-primary,.gallery-link{border:0;border-radius:12px;background:var(--forest);color:#fff;font-weight:800;text-decoration:none;padding:11px 14px;cursor:pointer;white-space:nowrap}.inline-primary:disabled{opacity:.45;cursor:not-allowed}.bird-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(260px,.85fr);gap:20px}.bird-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:linear-gradient(145deg,#e8eee4,#d5dfd1);display:grid;place-items:center;border:1px solid #d5dccf}.bird-preview-shell>*{grid-area:1/1}.bird-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.bird-preview-empty{text-align:center;color:#6d7c70;padding:20px}.bird-preview-empty span{display:block;font-size:42px;margin-bottom:8px}.bird-preview-empty p{font-size:12px;line-height:1.4;margin:0}.bird-mini-copy{align-self:center}.freshness,.provider-chip{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;font-size:9px;letter-spacing:.08em;font-weight:850;white-space:nowrap}.freshness{background:#e4eee3;color:#356246}.freshness.stale{background:#f3e4c8;color:#855b19}.freshness.loading{background:#e9e7df;color:#6d7069}.freshness.unavailable{background:#f4dfda;color:#843c31}.provider-chip{background:#e8eee4;color:#346051}.bird-mini-list{list-style:none;padding:0;margin:12px 0 18px;display:grid;gap:8px}.bird-mini-list li{display:grid;grid-template-columns:1fr auto;gap:10px;border-bottom:1px solid #e5e7df;padding:0 0 8px;font-size:13px}.bird-mini-list b{font-weight:750}.bird-mini-list span{color:#718075;font-size:11px}.gallery-link{display:inline-flex;align-items:center;justify-content:space-between;gap:18px}.gallery-link span{font-size:18px}
+.tabs{grid-template-columns:repeat(6,1fr)}.card-title{gap:12px}.render-row{display:flex;align-items:center;gap:16px;margin-top:17px;padding-top:15px;border-top:1px solid #e4e6dc}.render-row p{margin:0;flex:1;font-size:12px}.inline-primary,.gallery-link{border:0;border-radius:12px;background:var(--forest);color:#fff;font-weight:800;text-decoration:none;padding:11px 14px;cursor:pointer;white-space:nowrap}.inline-primary:disabled{opacity:.45;cursor:not-allowed}.bird-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(260px,.85fr);gap:20px}.bird-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:linear-gradient(145deg,#e8eee4,#d5dfd1);display:grid;place-items:center;border:1px solid #d5dccf}.bird-preview-shell>*{grid-area:1/1}.bird-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.bird-preview-empty{text-align:center;color:#6d7c70;padding:20px}.bird-preview-empty span{display:block;font-size:42px;margin-bottom:8px}.bird-preview-empty p{font-size:12px;line-height:1.4;margin:0}.bird-mini-copy{align-self:center}.freshness,.provider-chip{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;font-size:9px;letter-spacing:.08em;font-weight:850;white-space:nowrap}.freshness{background:#e4eee3;color:#356246}.freshness.stale{background:#f3e4c8;color:#855b19}.freshness.loading{background:#e9e7df;color:#6d7069}.freshness.unavailable{background:#f4dfda;color:#843c31}.provider-chip{background:#e8eee4;color:#346051}.bird-mini-list{list-style:none;padding:0;margin:12px 0 18px;display:grid;gap:8px}.bird-mini-list li{display:grid;grid-template-columns:1fr auto;gap:10px;border-bottom:1px solid #e5e7df;padding:0 0 8px;font-size:13px}.bird-mini-list b{font-weight:750}.bird-mini-list span{color:#718075;font-size:11px}.gallery-link{display:inline-flex;align-items:center;justify-content:space-between;gap:18px}.gallery-link span{font-size:18px}
+.star-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr);gap:22px;background:linear-gradient(145deg,#fffdf8 50%,#eef0e9)}.star-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:radial-gradient(circle at 50% 110%,#263e46,#13242e 58%,#0d1720);display:grid;place-items:center;border:1px solid #293f46}.star-preview-shell>*{grid-area:1/1}.star-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.star-preview-empty{text-align:center;color:#d5dfd3;padding:20px}.star-preview-empty span{display:block;color:#f0bd51;font-size:46px;margin-bottom:8px}.star-preview-empty p{font-size:12px;line-height:1.4;margin:0}.star-mini-copy{align-self:center}.direction-field{border-top:1px solid #e2e5dc;margin-top:17px;padding-top:15px}.direction-label{display:block;font-size:12px;font-weight:800;margin-bottom:9px}.compass-picker{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.compass-picker button{appearance:none;border:1px solid #cdd5ca;background:#fff;border-radius:12px;min-height:63px;padding:7px 4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}.compass-picker b{font:600 22px/1 Georgia,serif}.compass-picker small{font-size:9px;color:#748075}.compass-picker button.active{background:#173b35;border-color:#173b35;color:#fff;box-shadow:0 5px 14px #173b3533}.compass-picker button.active small{color:#dce8df}.star-actions{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:15px}.outline-button{border:1px solid #7c9587;border-radius:12px;background:#fff;color:var(--forest);font-weight:800;padding:10px 12px;cursor:pointer}.outline-button:disabled{opacity:.43;cursor:not-allowed}
 .demo-intro{font-size:13px;margin:-4px 0 16px}.demo-badge{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;background:#e9e7df;color:#6d7069;font-size:9px;letter-spacing:.08em;font-weight:850;text-transform:uppercase;white-space:nowrap}.demo-badge.active{background:#f4dfaa;color:#795612}.demo-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.demo-option{appearance:none;border:1px solid #d8ddd2;border-radius:15px;background:#fbfcf8;min-height:105px;padding:13px 9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;transition:.18s}.demo-option span{font-size:25px;color:var(--forest);line-height:1}.demo-option b{font-size:13px}.demo-option small{font-size:10px;color:#748075}.demo-option:hover{border-color:#7c9a8b;transform:translateY(-1px)}.demo-option.active{background:var(--forest);border-color:var(--forest);color:#fff;box-shadow:0 6px 16px #1d514533}.demo-option.active span,.demo-option.active small{color:#fff}.demo-option:disabled{opacity:.42;cursor:not-allowed;transform:none}.demo-active{margin-top:13px;border-radius:14px;background:#f5e8c7;padding:12px 13px;display:flex;align-items:center;gap:12px}.demo-active div{display:flex;flex-direction:column;gap:2px;flex:1}.demo-active small{color:#78633d;font-variant-numeric:tabular-nums}.demo-cancel{border:1px solid #c9aa68;background:#fff9eb;border-radius:10px;padding:8px 10px;font-size:11px;font-weight:800;cursor:pointer}.demo-cancel:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:640px){.hero{padding-left:17px;padding-right:17px}.pill{font-size:0;padding:9px}.pill i{margin:0}.hero-copy .eyebrow{font-size:9px}.stat-grid{gap:7px}.stat{padding:13px 11px}.stat strong{font-size:21px}.stat small{font-size:10px}.field-grid{grid-template-columns:1fr}.field.span-2{grid-column:auto}.field-switch{margin-top:4px}.location-grid{grid-template-columns:1fr}.location-card{min-height:155px}.activity-toolbar{top:78px;margin-left:-3px;margin-right:-3px}.save-bar{padding-left:13px}.save-bar span b{display:none}.secondary-button{padding-left:8px;padding-right:8px}.metric-head,.metric-row{grid-template-columns:122px repeat(5,66px) 62px}}
-@media(max-width:700px){.tab{font-size:9px}.tab span{font-size:17px}.bird-mini{grid-template-columns:1fr}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}.demo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.demo-option{min-height:96px}}
-@media(min-width:780px){.tabs{width:650px}.panel{padding-top:5px}.photo-card{display:grid;grid-template-columns:1.25fr .75fr;gap:18px;align-items:center}.photo-preview{grid-row:span 2;margin:0}.location-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.tabs{display:flex;overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity}.tabs::-webkit-scrollbar{display:none}.tab{font-size:9px;flex:0 0 76px;scroll-snap-align:start}.tab span{font-size:17px}.bird-mini,.star-mini{grid-template-columns:1fr}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}.star-actions{grid-template-columns:1fr}.demo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.demo-option{min-height:96px}}
+@media(min-width:780px){.tabs{width:760px}.panel{padding-top:5px}.photo-card{display:grid;grid-template-columns:1.25fr .75fr;gap:18px;align-items:center}.photo-preview{grid-row:span 2;margin:0}.location-grid{grid-template-columns:repeat(3,1fr)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 """
 
@@ -227,7 +260,9 @@ APP_JS = r"""
   const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
   const metricNames = {temperature_f:'Temperature °F',precipitation_chance:'Precipitation %',snowpack_inches:'Snowpack in',uv_index:'UV index',wind_mph:'Wind mph',visibility_miles:'Visibility mi',air_quality_index:'Air quality'};
   const demoLabels={weather:'Weather',birds:'Birds','star-map':'Stars','uploaded-photo':'Image'};
-  let catalog=null, settings=null, baseline='', photoAvailable=false, token='', birdSummaryTimer=null, renderPollTimer=null, demoState=null, demoDeadline=0, demoTimer=null, demoBusy=false;
+  const starDirectionLabels={north:'North',east:'East',south:'South',west:'West'};
+  const starDirectionCardinals={north:'N',east:'E',south:'S',west:'W'};
+  let catalog=null, settings=null, baseline='', photoAvailable=false, token='', birdSummaryTimer=null, starSummaryTimer=null, starSummary=null, renderPollTimer=null, demoState=null, demoDeadline=0, demoTimer=null, demoBusy=false;
 
   function acquireToken(){
     const url=new URL(location.href); const supplied=url.searchParams.get('token');
@@ -244,7 +279,7 @@ APP_JS = r"""
   function snapshot(){return JSON.stringify(settings)}
   function setDirty(){const dirty=snapshot()!==baseline;$('#save-bar').classList.toggle('hidden',!dirty)}
   function toast(message,isError=false){const el=$('#toast');el.textContent=message;el.classList.toggle('error',isError);el.classList.remove('hidden');setTimeout(()=>el.classList.add('hidden'),2600)}
-  function switchTab(name){$$('.tab').forEach(b=>{const active=b.dataset.tab===name;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active))});$$('.panel').forEach(p=>p.classList.toggle('active',p.id===`panel-${name}`));scrollTo({top:0,behavior:'smooth'})}
+  function switchTab(name){$$('.tab').forEach(b=>{const active=b.dataset.tab===name;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active))});$$('.panel').forEach(p=>p.classList.toggle('active',p.id===`panel-${name}`));if(name==='stars'&&settings)loadStarSummary();scrollTo({top:0,behavior:'smooth'})}
 
   function bindBasics(){
     $('#location-name').value=settings.display.location_name; $('#units').value=settings.display.units; $('#display-caption').checked=settings.display.caption; $('#display-mode').value=settings.display.mode;
@@ -265,6 +300,7 @@ APP_JS = r"""
     $('#bird-lookback').onchange=e=>{settings.birds.lookback_days=Number(e.target.value);setDirty()};
     $('#bird-title').oninput=e=>{settings.birds.title=e.target.value;setDirty()};
     $('#bird-subtitle').oninput=e=>{settings.birds.subtitle=e.target.value;setDirty()};
+    $$('[data-star-direction]').forEach(button=>button.onclick=()=>{settings.stars.direction=button.dataset.starDirection;renderStars();setDirty()});
     updateRenderButton();
   }
   function updateSuitability(){$('#suitability-output').textContent=`${Math.round(settings.minimum_suitability*100)}%`}
@@ -313,6 +349,32 @@ APP_JS = r"""
   function renderPhoto(){
     const preview=$('#photo-preview');if(photoAvailable){preview.className='photo-preview';preview.innerHTML=`<img alt="Uploaded frame photo" src="/api/photo?v=${Date.now()}">`}else{preview.className='photo-preview empty-preview';preview.innerHTML='<span>▣</span><p>No photo uploaded yet</p>'}
   }
+  function renderStars(){
+    const selected=settings.stars.direction;
+    $$('[data-star-direction]').forEach(button=>{const active=button.dataset.starDirection===selected;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active))});
+    if(starSummary)renderStarSummary(starSummary);
+  }
+  function renderedDate(value){
+    if(!value)return null;const date=new Date(value);return Number.isNaN(date.getTime())?null:date.toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  }
+  function renderStarSummary(data){
+    starSummary=data;const selected=settings.stars.direction,selectedCardinal=starDirectionCardinals[selected],selectedLabel=starDirectionLabels[selected];
+    const available=Boolean(data.preview_available),directionMatches=available&&data.rendered_direction===selectedCardinal,renderedTime=new Date(data.rendered_for||'').getTime(),age=Date.now()-renderedTime,freshSky=Number.isFinite(renderedTime)&&age>=-900000&&age<=43200000,ready=directionMatches&&freshSky;
+    const badge=$('#star-freshness');badge.textContent=ready?'Current':directionMatches?'Needs refresh':available?'Needs render':'No preview';badge.className=`freshness ${ready?'fresh':available?'stale':'unavailable'}`;
+    const image=$('#star-frame-preview'),empty=$('#star-preview-empty');if(available){image.src=`/api/stars/preview?v=${encodeURIComponent(data.preview_etag||Date.now())}`;image.classList.remove('hidden');empty.classList.add('hidden')}else{image.removeAttribute('src');image.classList.add('hidden');empty.classList.remove('hidden')}
+    const stamp=renderedDate(data.rendered_for||data.preview_generated_at),renderedLabel=({N:'North',E:'East',S:'South',W:'West'})[data.rendered_direction];
+    if(ready)$('#star-source-copy').textContent=`${selectedLabel}-centered sky${stamp?` rendered for ${stamp}`:''}. This preview matches your selected direction and tonight’s sky.`;
+    else if(directionMatches)$('#star-source-copy').textContent=`The preview faces ${selectedLabel}${stamp?` but was rendered for ${stamp}`:''}. Render again to update the stars for the current sky.`;
+    else if(available&&renderedLabel)$('#star-source-copy').textContent=`The latest preview faces ${renderedLabel}${stamp?` and was rendered for ${stamp}`:''}. Render again to create the selected ${selectedLabel} view.`;
+    else if(available)$('#star-source-copy').textContent=`A saved star map is available${stamp?` from ${stamp}`:''}, but its direction predates tracking. Render the selected ${selectedLabel} view to update it.`;
+    else $('#star-source-copy').textContent=`No committed star map yet. Render the ${selectedLabel} view to create one.`;
+    const demo=$('#demo-stars');demo.dataset.ready=String(ready);demo.title=ready?'Temporarily select this rendered map':directionMatches?'Render tonight’s current sky first':'Render the selected direction first';renderDemo();
+  }
+  async function loadStarSummary(){
+    clearTimeout(starSummaryTimer);
+    try{renderStarSummary(await api('/api/stars/summary'));starSummaryTimer=setTimeout(loadStarSummary,300000)}
+    catch(error){renderStarSummary({preview_available:false,preview_etag:null,preview_generated_at:null,rendered_for:null,rendered_direction:null});$('#star-source-copy').textContent=`Star preview unavailable: ${error.message}`;starSummaryTimer=setTimeout(loadStarSummary,60000)}
+  }
   function updateRenderButton(){
     const button=$('#render-selected');if(!button||!settings)return;const automatic=settings.display.mode==='automatic';
     button.disabled=automatic;button.textContent=automatic?'Automatic follows schedule':'Render selected now';
@@ -325,6 +387,7 @@ APP_JS = r"""
     if(active){$('#demo-active-title').textContent=`${demoLabels[activeMode]} selected`;$('#demo-countdown').textContent=demoClock(demoState.remaining_seconds);$('#demo-note').textContent='Press the physical frame button now. When the timer ends, the next refresh resumes your normal display setting.'}
     else{$('#demo-note').textContent='After five minutes, the next button press or automatic device check returns to your normal display setting.'}
     $('#demo-image').title=photoAvailable?'Show the uploaded image for five minutes':'Upload an image first';
+    const starDemo=$('#demo-stars'),activeStar=active&&activeMode==='star-map',starReady=starDemo.dataset.ready==='true';starDemo.disabled=demoBusy||(!activeStar&&!starReady);starDemo.textContent=activeStar?'End Stars demo':'Show for five minutes';
   }
   function tickDemo(){
     if(!demoState||!demoState.active)return;const remaining=Math.max(0,Math.ceil((demoDeadline-Date.now())/1000));demoState={...demoState,remaining_seconds:remaining};
@@ -365,12 +428,18 @@ APP_JS = r"""
   }
   async function renderSelected(){
     const mode=settings.display.mode;if(mode==='automatic'){toast('Choose a concrete display mode first',true);return}
+    await queueRender(mode);
+  }
+  async function renderStarsNow(){
+    await queueRender('star-map');
+  }
+  async function queueRender(mode){
     try{if(snapshot()!==baseline)await save(false);const result=await api('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});toast(result.queued?'Render queued':'That mode is already queued');pollRender(mode)}
     catch(error){toast(error.message,true)}
   }
   async function pollRender(mode){
     clearTimeout(renderPollTimer);
-    try{const status=await api('/api/render/status'),pending=status.queued_modes||[];if(status.state==='disabled')return;if(status.mode===mode&&status.state==='complete'&&!pending.includes(mode)){toast(`${mode.replace(/-/g,' ')} frame is ready`);if(mode==='birds')loadBirdSummary();return}if(status.mode===mode&&status.state==='failed'&&!pending.includes(mode)){toast(`${mode.replace(/-/g,' ')} render failed`,true);return}renderPollTimer=setTimeout(()=>pollRender(mode),1500)}
+    try{const status=await api('/api/render/status'),pending=status.queued_modes||[];if(status.state==='disabled')return;if(status.mode===mode&&status.state==='complete'&&!pending.includes(mode)){toast(`${mode.replace(/-/g,' ')} frame is ready`);if(mode==='birds')loadBirdSummary();if(mode==='star-map')loadStarSummary();return}if(status.mode===mode&&status.state==='failed'&&!pending.includes(mode)){toast(`${mode.replace(/-/g,' ')} render failed`,true);return}renderPollTimer=setTimeout(()=>pollRender(mode),1500)}
     catch(_error){renderPollTimer=setTimeout(()=>pollRender(mode),5000)}
   }
   function escapeHtml(text){const node=document.createElement('span');node.textContent=text;return node.innerHTML}
@@ -384,17 +453,17 @@ APP_JS = r"""
     try{settings.photo.enabled=true;await save(false);const body=new FormData();body.append('photo',file);const result=await api('/api/photo',{method:'POST',body});photoAvailable=true;renderPhoto();renderDemo();updateStats();notice.textContent=result.render_configured?(result.render_queued?'Photo uploaded. Its frame render has been queued.':'Photo uploaded. A frame render is already queued.'):'Photo uploaded successfully.';toast(result.render_configured?'Photo uploaded · render queued':'Photo uploaded');if(result.render_configured)pollRender('uploaded-photo')}
     catch(error){notice.textContent=error.message;notice.classList.add('error');toast(error.message,true)}
   }
-  function renderAll(){bindBasics();renderLocations();renderActivities();renderPhoto();renderDemo();updateStats();setDirty()}
+  function renderAll(){bindBasics();renderLocations();renderActivities();renderPhoto();renderStars();renderDemo();updateStats();setDirty()}
   async function load(){
     $('#loading').classList.remove('hidden');$('#fatal').classList.add('hidden');
-    try{const [cat,stored,health,demo]=await Promise.all([api('/api/catalog'),api('/api/settings'),api('/healthz'),api('/api/demo')]);catalog=cat;settings=stored;photoAvailable=Boolean(health.photo_available);baseline=snapshot();renderAll();applyDemoState(demo);loadBirdSummary();$('#connection-pill').className='pill online';$('#connection-pill').innerHTML='<i></i>Online'}
+    try{const [cat,stored,health,demo]=await Promise.all([api('/api/catalog'),api('/api/settings'),api('/healthz'),api('/api/demo')]);catalog=cat;settings=stored;photoAvailable=Boolean(health.photo_available);baseline=snapshot();renderAll();applyDemoState(demo);loadBirdSummary();loadStarSummary();$('#connection-pill').className='pill online';$('#connection-pill').innerHTML='<i></i>Online'}
     catch(error){$('#connection-pill').className='pill offline';$('#connection-pill').innerHTML='<i></i>Offline';$('#fatal').textContent=error.message;$('#fatal').classList.remove('hidden')}
     finally{$('#loading').classList.add('hidden')}
   }
   acquireToken();$$('.tab').forEach(button=>button.onclick=()=>switchTab(button.dataset.tab));$('#activity-search').oninput=renderActivities;
   $('#enable-all').onclick=()=>{settings.enabled_activities=catalog.activities.map(a=>a.id);renderActivities();setDirty()};$('#disable-all').onclick=()=>{settings.enabled_activities=[];renderActivities();setDirty()};
   $$('[data-demo-mode]').forEach(button=>button.onclick=()=>startDemo(button.dataset.demoMode));$('#demo-cancel').onclick=cancelDemo;
-  $('#save').onclick=()=>save();$('#discard').onclick=()=>{settings=JSON.parse(baseline);renderAll()};$('#reset').onclick=resetAll;$('#refresh').onclick=load;$('#photo-file').onchange=e=>uploadPhoto(e.target.files[0]);$('#render-selected').onclick=renderSelected;
+  $('#save').onclick=()=>save();$('#discard').onclick=()=>{settings=JSON.parse(baseline);renderAll()};$('#reset').onclick=resetAll;$('#refresh').onclick=load;$('#photo-file').onchange=e=>uploadPhoto(e.target.files[0]);$('#render-selected').onclick=renderSelected;$('#render-stars').onclick=renderStarsNow;$('#demo-stars').onclick=()=>demoState&&demoState.active&&demoState.mode==='star-map'?cancelDemo():startDemo('star-map');
   addEventListener('beforeunload',event=>{if(settings&&snapshot()!==baseline){event.preventDefault();event.returnValue=''}});load();
 })();
 """
@@ -639,59 +708,173 @@ class AsyncRuntimeRenderer:
             self._queue.task_done()
 
 
-def _resolve_bird_preview(output_directory: Path | None) -> tuple[Path, str, str | None]:
+@dataclass(frozen=True)
+class CommittedPreview:
+    payload: bytes
+    digest: str
+    generated_at: str | None
+    rendered_for: str | None
+    direction: str | None
+
+
+def _read_regular_file(path: Path, maximum: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size > maximum:
+            raise ValueError("Committed preview file has an invalid size or type")
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ValueError("Committed preview file was truncated")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+            or after.st_size != before.st_size
+            or after.st_mtime_ns != before.st_mtime_ns
+        ):
+            raise ValueError("Committed preview file changed while it was read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _canonical_timestamp(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.isoformat()
+
+
+def _load_committed_preview(
+    output_directory: Path | None,
+    mode: str,
+) -> CommittedPreview:
+    if mode not in ("birds", "star-map"):
+        raise ValueError("Preview mode is not allowed")
     if output_directory is None:
         raise FileNotFoundError("The runtime output directory is not configured")
     root = output_directory.expanduser().resolve(strict=False)
-    expected_mode = root / "birds"
+    expected_mode = root / mode
+    if expected_mode.is_symlink():
+        raise ValueError("Frame directory may not be a symbolic link")
+    mode_directory = expected_mode.resolve(strict=True)
     try:
-        mode_directory = expected_mode.resolve(strict=False)
         mode_directory.relative_to(root)
-    except (OSError, ValueError) as exc:
-        raise ValueError("Bird frame directory is outside the runtime output") from exc
-    if mode_directory != expected_mode or expected_mode.is_symlink():
-        raise ValueError("Bird frame directory may not be a symbolic link")
+    except ValueError as exc:
+        raise ValueError("Frame directory is outside the runtime output") from exc
+    if mode_directory != expected_mode:
+        raise ValueError("Frame directory may not traverse symbolic links")
+
     manifest_path = mode_directory / "current.json"
     if manifest_path.is_symlink():
-        raise ValueError("Bird frame manifest may not be a symbolic link")
-    size = manifest_path.stat().st_size
-    if size <= 0 or size > MAX_JSON_BYTES:
-        raise ValueError("Bird frame manifest has an invalid size")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict) or manifest.get("mode") != "birds":
-        raise ValueError("Bird frame manifest is invalid")
+        raise ValueError("Frame manifest may not be a symbolic link")
+    manifest_payload = _read_regular_file(manifest_path, MAX_JSON_BYTES)
+    manifest = json.loads(manifest_payload.decode("utf-8"))
+    if (
+        not isinstance(manifest, dict)
+        or type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 2
+        or manifest.get("format") != "eink-frame-artifacts-v2"
+        or manifest.get("mode") != mode
+    ):
+        raise ValueError("Frame manifest is invalid")
+
+    dimensions = manifest.get("dimensions")
+    if not isinstance(dimensions, dict):
+        raise ValueError("Frame manifest has invalid dimensions")
+    width = dimensions.get("width")
+    height = dimensions.get("height")
+    if (
+        type(width) is not int
+        or type(height) is not int
+        or width <= 0
+        or height <= 0
+        or width * height > MAX_IMAGE_PIXELS
+    ):
+        raise ValueError("Frame manifest has invalid dimensions")
+
+    pixel_checksum = manifest.get("pixel_checksum")
+    if not isinstance(pixel_checksum, dict):
+        raise ValueError("Frame manifest has no pixel checksum")
+    pixel_identity = pixel_checksum.get("value")
+    if (
+        pixel_checksum.get("algorithm") != "sha256-dimensions-rgb-v1"
+        or not isinstance(pixel_identity, str)
+        or _SHA256_RE.fullmatch(pixel_identity) is None
+    ):
+        raise ValueError("Frame manifest has an invalid pixel checksum")
+
     files = manifest.get("files")
     if not isinstance(files, dict):
-        raise ValueError("Bird frame manifest has no files")
-    entry = files.get("rgb_png") or files.get("eink_png")
+        raise ValueError("Frame manifest has no files")
+    entry_name = (
+        "eink_png"
+        if mode == "star-map"
+        else "rgb_png" if isinstance(files.get("rgb_png"), dict) else "eink_png"
+    )
+    entry = files.get(entry_name)
     if not isinstance(entry, dict):
-        raise ValueError("Bird frame manifest has no PNG preview")
-    relative = entry.get("path")
+        raise ValueError("Frame manifest has no PNG preview")
+    suffix = ".rgb.png" if entry_name == "rgb_png" else ".png"
+    expected_relative = f"frames/{pixel_identity}{suffix}"
     digest = entry.get("sha256")
+    declared_bytes = entry.get("bytes")
     if (
-        not isinstance(relative, str)
-        or _BIRD_PNG_RE.fullmatch(relative) is None
+        entry.get("path") != expected_relative
         or not isinstance(digest, str)
         or _SHA256_RE.fullmatch(digest) is None
+        or type(declared_bytes) is not int
+        or declared_bytes <= 8
+        or declared_bytes > MAX_PREVIEW_BYTES
     ):
-        raise ValueError("Bird preview identity is invalid")
-    candidate = mode_directory / relative
-    if candidate.is_symlink():
-        raise ValueError("Bird preview may not be a symbolic link")
-    resolved = candidate.resolve(strict=True)
-    resolved.relative_to(mode_directory)
-    if not resolved.is_file():
-        raise ValueError("Bird preview is not a regular file")
-    preview_size = resolved.stat().st_size
-    if preview_size <= 8 or preview_size > MAX_PREVIEW_BYTES:
-        raise ValueError("Bird preview has an invalid size")
-    with resolved.open("rb") as stream:
-        if stream.read(8) != b"\x89PNG\r\n\x1a\n":
-            raise ValueError("Bird preview is not a PNG")
-    generated_at = manifest.get("generated_at")
-    if not isinstance(generated_at, str):
-        generated_at = None
-    return resolved, digest, generated_at
+        raise ValueError("Frame preview identity is invalid")
+
+    frames_directory = mode_directory / "frames"
+    if frames_directory.is_symlink() or frames_directory.resolve(strict=True) != frames_directory:
+        raise ValueError("Frame preview directory may not be a symbolic link")
+    candidate = frames_directory / f"{pixel_identity}{suffix}"
+    if candidate.is_symlink() or candidate.resolve(strict=True) != candidate:
+        raise ValueError("Frame preview may not be a symbolic link")
+    payload = _read_regular_file(candidate, MAX_PREVIEW_BYTES)
+    if len(payload) != declared_bytes or hashlib.sha256(payload).hexdigest() != digest:
+        raise ValueError("Frame preview does not match its manifest")
+    try:
+        with Image.open(io.BytesIO(payload)) as opened:
+            if opened.format != "PNG" or opened.size != (width, height):
+                raise ValueError("Frame preview metadata does not match its image")
+            opened.verify()
+        with Image.open(io.BytesIO(payload)) as opened:
+            opened.load()
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ValueError("Frame preview is not a valid PNG") from exc
+
+    direction: str | None = None
+    view = manifest.get("view")
+    if isinstance(view, dict):
+        degrees = view.get("direction_degrees")
+        cardinal = view.get("direction_cardinal")
+        expected_cardinal = {0: "N", 90: "E", 180: "S", 270: "W"}.get(degrees)
+        if cardinal == expected_cardinal:
+            direction = cardinal
+    return CommittedPreview(
+        payload=payload,
+        digest=digest,
+        generated_at=_canonical_timestamp(manifest.get("generated_at")),
+        rendered_for=_canonical_timestamp(manifest.get("rendered_for")),
+        direction=direction,
+    )
 
 
 def _resolve_illustration(root: Path, slug: str) -> Path:
@@ -882,7 +1065,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                         "status": "ok",
                         "schema_version": SCHEMA_VERSION,
                         "photo_available": self.server.photo_path.is_file(),
-                        "bird_preview_available": self._bird_preview_available(),
+                        "bird_preview_available": self._preview_available("birds"),
+                        "star_preview_available": self._preview_available("star-map"),
                         "demo_active": demo["active"],
                     }
                 ),
@@ -900,9 +1084,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self._error(503, f"Bird summary is unavailable: {exc}")
                 return
             try:
-                _preview, digest, generated_at = _resolve_bird_preview(
-                    self.server.output_directory
-                )
+                preview = _load_committed_preview(self.server.output_directory, "birds")
             except (OSError, ValueError, json.JSONDecodeError):
                 summary.update(
                     {
@@ -915,36 +1097,76 @@ class ControlHandler(BaseHTTPRequestHandler):
                 summary.update(
                     {
                         "preview_available": True,
-                        "preview_etag": digest,
-                        "preview_generated_at": generated_at,
+                        "preview_etag": preview.digest,
+                        "preview_generated_at": preview.generated_at,
                     }
                 )
             self._reply(200, _json_bytes(summary))
         elif path == "/api/birds/preview":
             try:
-                preview, digest, generated_at = _resolve_bird_preview(
-                    self.server.output_directory
-                )
+                preview = _load_committed_preview(self.server.output_directory, "birds")
             except (OSError, ValueError, json.JSONDecodeError):
                 self._error(404, "No safely committed birds preview is available")
                 return
-            etag = f'"{digest}"'
+            etag = f'"{preview.digest}"'
             headers = {
                 "ETag": etag,
                 "Cache-Control": "private, no-cache",
                 "Content-Disposition": 'inline; filename="nearby-birds.png"',
             }
-            if generated_at:
-                headers["X-EInk-Generated-At"] = generated_at
+            if preview.generated_at:
+                headers["X-EInk-Generated-At"] = preview.generated_at
             if self.headers.get("If-None-Match", "").strip() == etag:
                 self._reply(304, extra_headers=headers)
                 return
+            self._reply(200, preview.payload, "image/png", headers)
+        elif path == "/api/stars/summary":
             try:
-                payload = preview.read_bytes()
-            except OSError:
-                self._error(404, "No safely committed birds preview is available")
+                preview = _load_committed_preview(self.server.output_directory, "star-map")
+            except (OSError, ValueError, json.JSONDecodeError):
+                self._reply(
+                    200,
+                    _json_bytes(
+                        {
+                            "preview_available": False,
+                            "preview_etag": None,
+                            "preview_generated_at": None,
+                            "rendered_for": None,
+                            "rendered_direction": None,
+                        }
+                    ),
+                )
                 return
-            self._reply(200, payload, "image/png", headers)
+            self._reply(
+                200,
+                _json_bytes(
+                    {
+                        "preview_available": True,
+                        "preview_etag": preview.digest,
+                        "preview_generated_at": preview.generated_at,
+                        "rendered_for": preview.rendered_for,
+                        "rendered_direction": preview.direction,
+                    }
+                ),
+            )
+        elif path == "/api/stars/preview":
+            try:
+                preview = _load_committed_preview(self.server.output_directory, "star-map")
+            except (OSError, ValueError, json.JSONDecodeError):
+                self._error(404, "No safely committed stars preview is available")
+                return
+            etag = f'"{preview.digest}"'
+            headers = {
+                "ETag": etag,
+                "Cache-Control": "private, no-cache",
+                "Content-Disposition": 'inline; filename="tonights-sky.png"',
+            }
+            if preview.generated_at:
+                headers["X-EInk-Generated-At"] = preview.generated_at
+            if self.headers.get("If-None-Match", "").strip() == etag:
+                self._reply(304, extra_headers=headers)
+                return
+            self._reply(200, preview.payload, "image/png", headers)
         elif path.startswith("/bird-art/") and path.endswith(".png"):
             slug = path[len("/bird-art/") : -len(".png")]
             try:
@@ -976,9 +1198,9 @@ class ControlHandler(BaseHTTPRequestHandler):
         else:
             self._error(404, "Not found")
 
-    def _bird_preview_available(self) -> bool:
+    def _preview_available(self, mode: str) -> bool:
         try:
-            _resolve_bird_preview(self.server.output_directory)
+            _load_committed_preview(self.server.output_directory, mode)
         except (OSError, ValueError, json.JSONDecodeError):
             return False
         return True
