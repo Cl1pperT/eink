@@ -56,11 +56,14 @@ collage, the morning weather renderer from
 hosts an optional LAN photo-upload page. Every source passes through the weather
 fork's EL133UF1-compatible Spectra 6 conversion pipeline.
 
-The live star map uses catalogued B-V values to distinguish hot blue, neutral
-white, Sun-like gold, and cool red stars. It also draws a red ecliptic, green
-constellation geometry, a palette-optimized twilight horizon, and enlarged
-not-to-scale planet miniatures with individual colors and silhouettes (including
-Saturn's rings).
+The live star display is a circular full-sky atlas calculated for 90 minutes
+after local sunset. The selected north, east, south, or west direction is
+rotated to the bottom of the chart. Most stars, grid lines, and constellation
+geometry remain clean white; only the brightest stars receive catalogued B-V
+blue, white, gold, or red color. One prominent constellation is selected
+automatically and traced in gold. Palette-safe illustrated planets appear at
+their live positions, while a right-hand planetarium guide shows the Moon,
+sunset and sunrise, visible planets, a suggested object, compass, and color key.
 
 When those projects are checked out at `peacock/AvianVisitors` and
 `stars/integrations/inkystarmap`, the simulator and checkout-based headless CLI

@@ -108,14 +108,19 @@ timer jobs, and the page reports completion or failure without blocking an HTTP
 request. Render jobs reload the overlay each time. Do not expose port 8765 to
 the public internet.
 
-The Stars tab safely previews the latest committed sky frame and persists a
-North, East, South, or West center direction for scheduled and manual renders.
+The Stars tab safely previews the latest committed circular sky atlas and
+persists which North, East, South, or West direction is rotated to the bottom
+for scheduled and manual renders. Live charts target 90 minutes after local
+sunset; their manifest view records that observation time and observing-night
+date separately from the actual render timestamp. The committed preview also
+records the following sunrise so the website expires the chart at the real end
+of that observing night.
 **Save & render tonight's sky** saves the selection before creating a new
 committed `star-map` frame.
 
 | Control-panel endpoint | Result |
 | --- | --- |
-| `/api/stars/summary` | Read-only availability, timestamp, and rendered direction for the committed star frame |
+| `/api/stars/summary` | Read-only availability, render/observation timestamps, observing night, featured constellation, and orientation for the committed star frame |
 | `/api/stars/preview` | Manifest-validated PNG for the committed star frame, with ETag revalidation |
 
 The Overview page and Stars tab **Five-minute demo** controls select the latest

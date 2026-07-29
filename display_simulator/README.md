@@ -99,12 +99,15 @@ python3 -m playwright install chromium
 
 Do not install inkystarmap's full Raspberry Pi package on the Mac solely for the
 simulator: its module initializes `inky.auto()` at import time. The adapter uses
-the same `HorizonPlot`, style, constellation, magnitude, planet, moon, and field-
-of-view settings while keeping that hardware module out of the process. Stars
-are colored from their catalogued B-V temperature index, while visible planets
-use enlarged not-to-scale, individually colored markers with recognizable
-details such as Saturn's ring. A red ecliptic and six-pigment-aware sky styling
-make those additions survive the physical display conversion cleanly.
+Starplot's circular `ZenithPlot` while keeping that hardware module out of the
+process. The atlas shows the full visible sky 90 minutes after local sunset and
+rotates the selected cardinal direction to the bottom. Its grid, ordinary
+constellations, and faint stars stay white; only the brightest stars receive
+their catalogued B-V colors. A prominent constellation is traced in gold,
+palette-safe miniature planets retain details such as Saturn's ring and
+Jupiter's bands, and a right-side planetarium guide summarizes the observing
+night. This side-by-side planetarium layout targets the frame's 1600×1200
+landscape orientation.
 
 The central conversion is ported from the weather fork's `weather_frame/eink.py`
 and mirrors the Pimoroni EL133UF1 driver's saturation-interpolated matching

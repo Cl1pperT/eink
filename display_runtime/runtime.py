@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import importlib
 import importlib.util
@@ -98,6 +98,44 @@ def _first_value(*values: Any, default: Any = None) -> Any:
         if value is not None:
             return value
     return default
+
+
+def _star_view_metadata(options: Mapping[str, Any]) -> dict[str, str]:
+    """Validate astronomy metadata emitted by the live star source."""
+    result: dict[str, str] = {}
+    observation = options.get("star_observation_time")
+    if isinstance(observation, str):
+        try:
+            parsed = datetime.fromisoformat(observation.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                result["observation_time"] = parsed.isoformat()
+    sunrise = options.get("star_sunrise_time")
+    if isinstance(sunrise, str):
+        try:
+            parsed = datetime.fromisoformat(sunrise.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                result["sunrise_time"] = parsed.isoformat()
+    night_date = options.get("star_night_date")
+    if isinstance(night_date, str):
+        try:
+            result["night_date"] = date.fromisoformat(night_date).isoformat()
+        except ValueError:
+            pass
+    featured = options.get("star_featured_constellation")
+    if (
+        isinstance(featured, str)
+        and featured.strip() == featured
+        and 1 <= len(featured) <= 80
+        and featured.isprintable()
+    ):
+        result["featured_constellation"] = featured
+    return result
 
 
 def _load_control_overlay(
@@ -936,6 +974,7 @@ class FrameRuntime:
             manifest["view"] = {"direction_degrees": direction_degrees}
             if cardinal is not None:
                 manifest["view"]["direction_cardinal"] = cardinal
+            manifest["view"].update(_star_view_metadata(context.options))
         return manifest
 
     def render(
@@ -994,13 +1033,13 @@ class FrameRuntime:
             rgb_path = frames_directory / f"{checksum}.rgb.png" if cfg.write_rgb else None
             current = _load_manifest(current_path)
             current_wire_checksum = ((current or {}).get("wire") or {}).get("sha256")
-            current_direction = ((current or {}).get("view") or {}).get(
-                "direction_degrees"
-            )
+            current_view = (current or {}).get("view") or {}
+            current_direction = current_view.get("direction_degrees")
             source_applies_direction = (
                 _DIRECTION_AWARE_STAR_SOURCE in result.source_name
             )
-            direction_changed = (
+            target_star_metadata = _star_view_metadata(context.options)
+            star_view_changed = (
                 mode == "star-map"
                 and (
                     current_direction != context.options.get("direction")
@@ -1008,12 +1047,22 @@ class FrameRuntime:
                     else current_direction is not None
                 )
             )
+            if mode == "star-map" and source_applies_direction:
+                star_view_changed = star_view_changed or any(
+                    current_view.get(key) != target_star_metadata.get(key)
+                    for key in (
+                        "observation_time",
+                        "sunrise_time",
+                        "night_date",
+                        "featured_constellation",
+                    )
+                )
             frame_valid = _native_file_is_valid(frame_path, checksum, result.eink_image.size)
             wire_valid = _binary_file_is_valid(
                 wire_path, EE02_PAYLOAD_BYTES, encoded.sha256
             )
             rgb_valid = rgb_path is None or rgb_path.is_file()
-            changed = current_wire_checksum != encoded.sha256 or direction_changed
+            changed = current_wire_checksum != encoded.sha256 or star_view_changed
 
             if not force and not changed and frame_valid and wire_valid and rgb_valid:
                 return RuntimeArtifact(

@@ -103,6 +103,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(b"Five-minute demo", body)
         self.assertEqual(body.count(b"data-demo-mode="), 4)
         self.assertIn(b"Press the physical button", body)
+        self.assertIn(b"whole visible sky", body)
+        self.assertIn(b"90 minutes after local sunset", body)
+        self.assertIn(b"Date.now()<=sunriseTime", body)
         self.assertNotIn(b"X-EInk-Control-Token", body)
         self.assertNotIn(b"localStorage.setItem", body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
@@ -226,6 +229,10 @@ class ControlServerTests(unittest.TestCase):
                     "view": {
                         "direction_degrees": 90,
                         "direction_cardinal": "E",
+                        "observation_time": "2026-07-27T22:18:00-06:00",
+                        "sunrise_time": "2026-07-28T06:21:00-06:00",
+                        "night_date": "2026-07-27",
+                        "featured_constellation": "Cygnus",
                     },
                     "files": {
                         "eink_png": {
@@ -246,6 +253,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(summary["preview_etag"], digest)
         self.assertEqual(summary["rendered_direction"], "E")
         self.assertEqual(summary["rendered_for"], "2026-07-27T21:30:00-06:00")
+        self.assertEqual(summary["observation_time"], "2026-07-27T22:18:00-06:00")
+        self.assertEqual(summary["sunrise_time"], "2026-07-28T06:21:00-06:00")
+        self.assertEqual(summary["night_date"], "2026-07-27")
+        self.assertEqual(summary["featured_constellation"], "Cygnus")
 
         status, headers, body = self.request("GET", "/api/stars/preview")
         self.assertEqual(status, 200)

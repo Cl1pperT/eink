@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 import hashlib
 import io
 import json
@@ -157,7 +157,7 @@ INDEX_HTML = r"""<!doctype html>
     </section>
 
     <section id="panel-stars" class="panel" aria-labelledby="stars-title">
-      <div class="section-heading"><div><p class="eyebrow">Tonight overhead</p><h2 id="stars-title">Star map</h2><p>Choose the horizon you want centered, render the current sky, then press the frame button when you are ready to display it.</p></div></div>
+      <div class="section-heading"><div><p class="eyebrow">Tonight overhead</p><h2 id="stars-title">Star map</h2><p>Choose the direction you will face. The circular atlas places it at the bottom and charts the full visible sky for 90 minutes after sunset.</p></div></div>
       <article class="card star-mini">
         <div class="star-preview-shell">
           <img id="star-frame-preview" class="hidden" alt="Latest star map artwork rendered for the e-ink frame">
@@ -167,7 +167,7 @@ INDEX_HTML = r"""<!doctype html>
           <div class="card-title"><div><p class="eyebrow">Committed frame</p><h3>Latest night sky</h3></div><span id="star-freshness" class="freshness loading">Loading</span></div>
           <p id="star-source-copy" class="muted">Checking the latest saved star map…</p>
           <div class="direction-field">
-            <span class="direction-label">Center the view</span>
+            <span class="direction-label">Face toward</span>
             <div class="compass-picker" role="group" aria-label="Star map viewing direction">
               <button type="button" data-star-direction="north" aria-pressed="false"><b>N</b><small>North</small></button>
               <button type="button" data-star-direction="east" aria-pressed="false"><b>E</b><small>East</small></button>
@@ -179,7 +179,7 @@ INDEX_HTML = r"""<!doctype html>
             <button id="render-stars" class="inline-primary" type="button">Save &amp; render tonight’s sky</button>
             <button id="demo-stars" class="outline-button" type="button" disabled>Show for five minutes</button>
           </div>
-          <p class="helper">Each map spans a 180° horizon centered on your choice and uses the frame location and current local time. “Show for five minutes” still requires a physical frame-button press.</p>
+          <p class="helper">Each map shows the whole visible sky, with your chosen direction at the bottom, a planetarium guide on the right, and the sky calculated for 90 minutes after local sunset. “Show for five minutes” still requires a physical frame-button press.</p>
         </div>
       </article>
     </section>
@@ -357,14 +357,14 @@ APP_JS = r"""
   }
   function renderStarSummary(data){
     starSummary=data;const selected=settings.stars.direction,selectedCardinal=starDirectionCardinals[selected],selectedLabel=starDirectionLabels[selected];
-    const available=Boolean(data.preview_available),directionMatches=available&&data.rendered_direction===selectedCardinal,renderedTime=new Date(data.rendered_for||'').getTime(),age=Date.now()-renderedTime,freshSky=Number.isFinite(renderedTime)&&age>=-900000&&age<=43200000,ready=directionMatches&&freshSky;
+    const available=Boolean(data.preview_available),directionMatches=available&&data.rendered_direction===selectedCardinal,renderedTime=new Date(data.rendered_for||'').getTime(),age=Date.now()-renderedTime,observationTime=new Date(data.observation_time||'').getTime(),sunriseTime=new Date(data.sunrise_time||'').getTime(),freshSky=Number.isFinite(sunriseTime)?Number.isFinite(renderedTime)&&age>=-900000&&Date.now()<=sunriseTime:Number.isFinite(renderedTime)&&age>=-900000&&age<=43200000,ready=directionMatches&&freshSky;
     const badge=$('#star-freshness');badge.textContent=ready?'Current':directionMatches?'Needs refresh':available?'Needs render':'No preview';badge.className=`freshness ${ready?'fresh':available?'stale':'unavailable'}`;
     const image=$('#star-frame-preview'),empty=$('#star-preview-empty');if(available){image.src=`/api/stars/preview?v=${encodeURIComponent(data.preview_etag||Date.now())}`;image.classList.remove('hidden');empty.classList.add('hidden')}else{image.removeAttribute('src');image.classList.add('hidden');empty.classList.remove('hidden')}
-    const stamp=renderedDate(data.rendered_for||data.preview_generated_at),renderedLabel=({N:'North',E:'East',S:'South',W:'West'})[data.rendered_direction];
-    if(ready)$('#star-source-copy').textContent=`${selectedLabel}-centered sky${stamp?` rendered for ${stamp}`:''}. This preview matches your selected direction and tonight’s sky.`;
-    else if(directionMatches)$('#star-source-copy').textContent=`The preview faces ${selectedLabel}${stamp?` but was rendered for ${stamp}`:''}. Render again to update the stars for the current sky.`;
-    else if(available&&renderedLabel)$('#star-source-copy').textContent=`The latest preview faces ${renderedLabel}${stamp?` and was rendered for ${stamp}`:''}. Render again to create the selected ${selectedLabel} view.`;
-    else if(available)$('#star-source-copy').textContent=`A saved star map is available${stamp?` from ${stamp}`:''}, but its direction predates tracking. Render the selected ${selectedLabel} view to update it.`;
+    const stamp=renderedDate(data.rendered_for||data.preview_generated_at),skyStamp=renderedDate(data.observation_time),renderedLabel=({N:'North',E:'East',S:'South',W:'West'})[data.rendered_direction];
+    if(ready)$('#star-source-copy').textContent=`Full visible sky oriented toward ${selectedLabel}${skyStamp?` and charted for ${skyStamp}`:''}. This preview matches your selected direction and observing night.`;
+    else if(directionMatches)$('#star-source-copy').textContent=`The preview faces ${selectedLabel}${stamp?` but was generated ${stamp}`:''}. Render again to chart the current observing night.`;
+    else if(available&&renderedLabel)$('#star-source-copy').textContent=`The latest full-sky atlas faces ${renderedLabel}${skyStamp?` and is charted for ${skyStamp}`:''}. Render again to place ${selectedLabel} at the bottom.`;
+    else if(available)$('#star-source-copy').textContent=`A saved star map is available${stamp?` from ${stamp}`:''}, but its direction predates tracking. Render the selected ${selectedLabel} orientation to update it.`;
     else $('#star-source-copy').textContent=`No committed star map yet. Render the ${selectedLabel} view to create one.`;
     const demo=$('#demo-stars');demo.dataset.ready=String(ready);demo.title=ready?'Temporarily select this rendered map':directionMatches?'Render tonight’s current sky first':'Render the selected direction first';renderDemo();
   }
@@ -713,6 +713,10 @@ class CommittedPreview:
     generated_at: str | None
     rendered_for: str | None
     direction: str | None
+    observation_time: str | None
+    sunrise_time: str | None
+    night_date: str | None
+    featured_constellation: str | None
 
 
 def _read_regular_file(path: Path, maximum: int) -> bytes:
@@ -753,6 +757,15 @@ def _canonical_timestamp(value: Any) -> str | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.isoformat()
+
+
+def _canonical_date(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        return None
 
 
 def _load_committed_preview(
@@ -859,6 +872,10 @@ def _load_committed_preview(
         raise ValueError("Frame preview is not a valid PNG") from exc
 
     direction: str | None = None
+    observation_time: str | None = None
+    sunrise_time: str | None = None
+    night_date: str | None = None
+    featured_constellation: str | None = None
     view = manifest.get("view")
     if isinstance(view, dict):
         degrees = view.get("direction_degrees")
@@ -866,12 +883,27 @@ def _load_committed_preview(
         expected_cardinal = {0: "N", 90: "E", 180: "S", 270: "W"}.get(degrees)
         if cardinal == expected_cardinal:
             direction = cardinal
+        observation_time = _canonical_timestamp(view.get("observation_time"))
+        sunrise_time = _canonical_timestamp(view.get("sunrise_time"))
+        night_date = _canonical_date(view.get("night_date"))
+        featured = view.get("featured_constellation")
+        if (
+            isinstance(featured, str)
+            and featured.strip() == featured
+            and 1 <= len(featured) <= 80
+            and featured.isprintable()
+        ):
+            featured_constellation = featured
     return CommittedPreview(
         payload=payload,
         digest=digest,
         generated_at=_canonical_timestamp(manifest.get("generated_at")),
         rendered_for=_canonical_timestamp(manifest.get("rendered_for")),
         direction=direction,
+        observation_time=observation_time,
+        sunrise_time=sunrise_time,
+        night_date=night_date,
+        featured_constellation=featured_constellation,
     )
 
 
@@ -1113,6 +1145,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                             "preview_generated_at": None,
                             "rendered_for": None,
                             "rendered_direction": None,
+                            "observation_time": None,
+                            "sunrise_time": None,
+                            "night_date": None,
+                            "featured_constellation": None,
                         }
                     ),
                 )
@@ -1126,6 +1162,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                         "preview_generated_at": preview.generated_at,
                         "rendered_for": preview.rendered_for,
                         "rendered_direction": preview.direction,
+                        "observation_time": preview.observation_time,
+                        "sunrise_time": preview.sunrise_time,
+                        "night_date": preview.night_date,
+                        "featured_constellation": preview.featured_constellation,
                     }
                 ),
             )

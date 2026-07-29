@@ -28,6 +28,19 @@ class SolidSource:
         return Image.new("RGB", (40, 30), self.color)
 
 
+class StarMetadataSource(SolidSource):
+    def __init__(self, metadata: dict[str, str | None]) -> None:
+        super().__init__(
+            (10, 20, 40),
+            "Star Map · live inkystarmap/Starplot render",
+        )
+        self.metadata = metadata
+
+    def render(self, context):
+        context.options.update(self.metadata)
+        return super().render(context)
+
+
 class FailingSource:
     name = "Test Pattern · failure"
 
@@ -305,6 +318,70 @@ class FrameRuntimeTests(unittest.TestCase):
             )
             self.assertTrue(static.changed)
             self.assertNotIn("view", static_manifest)
+
+    def test_star_manifest_rewrites_when_observing_night_changes_with_same_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            metadata = {
+                "star_observation_time": "2026-07-27T22:10:00-06:00",
+                "star_sunrise_time": "2026-07-28T06:21:00-06:00",
+                "star_night_date": "2026-07-27",
+                "star_featured_constellation": "Scorpius",
+            }
+            runtime = FrameRuntime(
+                config,
+                source_factories={
+                    "star-map": lambda: StarMetadataSource(dict(metadata)),
+                },
+            )
+            when = parse_render_time("2026-07-27T19:55:00", config.timezone)
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "south"},
+            ):
+                first = runtime.render("star-map", when=when, allow_demo=True)
+            first_manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                first_manifest["view"]["observation_time"],
+                "2026-07-27T22:10:00-06:00",
+            )
+            self.assertEqual(first_manifest["view"]["night_date"], "2026-07-27")
+            self.assertEqual(
+                first_manifest["view"]["sunrise_time"],
+                "2026-07-28T06:21:00-06:00",
+            )
+            self.assertEqual(
+                first_manifest["view"]["featured_constellation"],
+                "Scorpius",
+            )
+
+            metadata.update(
+                {
+                    "star_observation_time": "2026-07-28T22:09:00-06:00",
+                    "star_sunrise_time": "2026-07-29T06:22:00-06:00",
+                    "star_night_date": "2026-07-28",
+                    "star_featured_constellation": "Sagittarius",
+                }
+            )
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "south"},
+            ):
+                second = runtime.render("star-map", when=when, allow_demo=True)
+            second_manifest = json.loads(second.manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(first.wire_checksum, second.wire_checksum)
+            self.assertTrue(second.changed)
+            self.assertTrue(second.written)
+            self.assertEqual(second_manifest["view"]["night_date"], "2026-07-28")
+            self.assertEqual(
+                second_manifest["view"]["featured_constellation"],
+                "Sagittarius",
+            )
 
     def test_uploaded_photo_uses_photo_only_conversion(self):
         with tempfile.TemporaryDirectory() as directory:
