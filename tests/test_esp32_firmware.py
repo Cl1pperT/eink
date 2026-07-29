@@ -111,7 +111,7 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         self.assertIn('hostname.endsWith(".local")', self.source)
         self.assertIn("MDNS.queryHost(mdnsName, 5000)", self.source)
 
-    def test_timer_or_user_button_wakes_one_check_then_deep_sleep(self):
+    def test_timer_or_mode_button_wakes_one_check_then_deep_sleep(self):
         self.assertIn('#define EINK_FRAME_MODE "active"', self.device_config)
         self.assertIn('mode == "active"', self.contract)
         self.assertIn("isFrameChannel", self.source)
@@ -120,12 +120,24 @@ class ESP32FirmwareContractTests(unittest.TestCase):
         )
         for pin in ("GPIO_NUM_2", "GPIO_NUM_3", "GPIO_NUM_5"):
             self.assertIn(pin, self.source)
+        for constant, mode in (
+            ("kButton1FrameMode", "weather"),
+            ("kButton2FrameMode", "birds"),
+            ("kButton3FrameMode", "star-map"),
+        ):
+            declaration = f'constexpr char {constant}[] = "{mode}";'
+            self.assertIn(declaration, self.source)
         self.assertIn("ESP_EXT1_WAKEUP_ANY_LOW", self.source)
+        self.assertIn("esp_sleep_get_ext1_wakeup_status()", self.source)
+        self.assertIn("frameModeForButtonWake(wakeStatus)", self.source)
         self.assertIn(
             "esp_sleep_enable_timer_wakeup(timerWakeSeconds * 1000000ULL)",
             self.source,
         )
-        self.assertIn("syncFrame(EINK_FRAME_MODE);", self.source)
+        self.assertIn(
+            "const char *requestedFrameMode = EINK_FRAME_MODE;", self.source
+        )
+        self.assertIn("syncFrame(requestedFrameMode);", self.source)
         self.assertIn("esp_deep_sleep_start();", self.source)
         self.assertNotIn("EINK_POLL_INTERVAL_MS", self.source)
 
@@ -190,7 +202,7 @@ class ESP32FirmwareContractTests(unittest.TestCase):
 
     def test_cached_and_physically_shown_battery_states_are_separate(self):
         battery_commit_at = self.source.index("persistBatteryState();")
-        frame_sync_at = self.source.index("syncFrame(EINK_FRAME_MODE);")
+        frame_sync_at = self.source.index("syncFrame(requestedFrameMode);")
         self.assertLess(battery_commit_at, frame_sync_at)
         self.assertIn('kPreferenceBatteryValid[] = "bat-valid"', self.source)
         self.assertIn('kPreferenceMarkValid[] = "mark-valid"', self.source)

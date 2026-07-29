@@ -2,10 +2,11 @@
 
 This PlatformIO/Arduino project targets a Seeed Studio XIAO ESP32S3 with PSRAM,
 the XIAO ePaper Display Board EE02, and the 13.3-inch T133A01 Spectra 6 panel.
-Every five minutes—or immediately on a press of any user button—it checks the
-headless runtime's virtual `active` frame endpoint. The Pi resolves that
-channel from the validated phone-control selection and automatic weather,
-bird, and star-map schedule.
+Every five minutes it checks the headless runtime's virtual `active` frame
+endpoint. The Pi resolves that channel from the validated phone-control
+selection and automatic weather, bird, and star-map schedule. The three user
+buttons wake the board immediately and directly request weather, birds, or the
+star map respectively.
 
 The EE02's built-in battery divider is sampled once per local day at 06:00.
 The estimate is cached in NVS and written on every physical mode as a small
@@ -87,7 +88,8 @@ datasheet curve.
 The flow is intentionally small:
 
 1. Power-up, reset, firmware upload, the five-minute timer, or any user button
-   wakes the ESP32.
+   wakes the ESP32. Button 1 selects weather, the middle button selects birds,
+   and button 3 selects the star map.
 2. On the first wake at 06:00, GPIO6 briefly enables the EE02 divider. The
    firmware takes a median of 25 calibrated ADC readings on GPIO1, doubles the
    divider voltage, estimates a percentage, and switches the divider off.
@@ -100,14 +102,15 @@ The flow is intentionally small:
 6. The ESP32 turns Wi-Fi off and deep-sleeps until the next timer or button
    wake.
 
-The default frame channel is `active`. Change `EINK_FRAME_MODE` in
-`include/device_config.h` only if this board should follow one concrete server
-frame regardless of the phone-control selection.
-GPIO 2, 3, and 5 are the EE02's active-low user buttons. All three currently
-perform the same immediate check. Change `EINK_CHECK_INTERVAL_SECONDS` to
-adjust the default 300-second timer. The default POSIX timezone is
-America/Denver (`MST7MDT,M3.2.0,M11.1.0`); override `EINK_TIMEZONE` if the
-frame moves.
+The default timer/reset frame channel is `active`. Change `EINK_FRAME_MODE` in
+`include/device_config.h` only if those non-button wakes should follow one
+concrete server frame regardless of the phone-control selection. GPIO 2, 3,
+and 5 are the EE02's active-low user buttons and directly request `weather`,
+`birds`, and `star-map` in that order. A button selection is a one-shot request:
+the next timer wake returns to `active` and the normal automatic/manual web
+selection. Change `EINK_CHECK_INTERVAL_SECONDS` to adjust the default
+300-second timer. The default POSIX timezone is America/Denver
+(`MST7MDT,M3.2.0,M11.1.0`); override `EINK_TIMEZONE` if the frame moves.
 
 Successful ETag, mode, and SHA-256 state are stored in ESP32 NVS and survive
 deep sleep; the e-paper preserves its image without power. Before touching the

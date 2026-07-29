@@ -77,6 +77,9 @@ constexpr uint8_t kBatteryMarkVersion = 1;
 constexpr gpio_num_t kButton1 = GPIO_NUM_2;
 constexpr gpio_num_t kButton2 = GPIO_NUM_3;
 constexpr gpio_num_t kButton3 = GPIO_NUM_5;
+constexpr char kButton1FrameMode[] = "weather";
+constexpr char kButton2FrameMode[] = "birds";
+constexpr char kButton3FrameMode[] = "star-map";
 constexpr uint8_t kBatteryAdcPin = EINK_BATTERY_ADC_PIN;
 constexpr uint8_t kBatteryEnablePin = EINK_BATTERY_ENABLE_PIN;
 constexpr uint64_t kButtonWakeMask =
@@ -956,6 +959,23 @@ bool anyButtonIsPressed() {
          digitalRead(kButton3) == LOW;
 }
 
+const char *frameModeForButtonWake(uint64_t wakeStatus) {
+  // Give the numbered buttons deterministic priority if more than one is
+  // pressed at the same time. EXT1 retains this mask across deep sleep, so the
+  // selection remains reliable even when the user releases the button before
+  // setup reaches this function.
+  if ((wakeStatus & (1ULL << kButton1)) != 0) {
+    return kButton1FrameMode;
+  }
+  if ((wakeStatus & (1ULL << kButton2)) != 0) {
+    return kButton2FrameMode;
+  }
+  if ((wakeStatus & (1ULL << kButton3)) != 0) {
+    return kButton3FrameMode;
+  }
+  return nullptr;
+}
+
 uint64_t nextTimerWakeSeconds() {
   uint64_t wakeSeconds = EINK_CHECK_INTERVAL_SECONDS;
   struct tm localClock {};
@@ -1023,9 +1043,21 @@ void setup() {
   tzset();
   delay(750);
   Serial.println("EE02 image and daily battery updater starting");
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
-    Serial.println("Wake reason: user button");
-  } else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  const char *requestedFrameMode = EINK_FRAME_MODE;
+  if (wakeCause == ESP_SLEEP_WAKEUP_EXT1) {
+    const uint64_t wakeStatus =
+        esp_sleep_get_ext1_wakeup_status() & kButtonWakeMask;
+    const char *buttonFrameMode = frameModeForButtonWake(wakeStatus);
+    if (buttonFrameMode != nullptr) {
+      requestedFrameMode = buttonFrameMode;
+      Serial.printf("Wake reason: user button; requesting %s\n",
+                    requestedFrameMode);
+    } else {
+      Serial.println(
+          "Wake reason: user button without a valid pin; requesting active");
+    }
+  } else if (wakeCause == ESP_SLEEP_WAKEUP_TIMER) {
     Serial.println("Wake reason: scheduled timer");
   } else {
     Serial.println("Wake reason: power-on, reset, or upload");
@@ -1075,7 +1107,7 @@ void setup() {
     sampleBatteryIfDue(nullptr);
   }
 
-  syncFrame(EINK_FRAME_MODE);
+  syncFrame(requestedFrameMode);
   sleepUntilButton();
 }
 
