@@ -8,6 +8,7 @@ import importlib
 import importlib.util
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -66,6 +67,45 @@ STAR_DIRECTION_DEGREES = {
     "west": 270,
 }
 _DIRECTION_AWARE_STAR_SOURCE = "live inkystarmap/Starplot render"
+_RARE_EVENT_KINDS = frozenset(
+    ("meteor", "aurora", "eclipse", "satellite", "conjunction")
+)
+_RARE_EVENT_CONFIDENCE = frozenset(("high", "medium", "low"))
+_RARE_EVENT_DIRECTIONS = frozenset(
+    ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+)
+_RARE_EVENT_REQUIRED_FIELDS = frozenset(
+    (
+        "id",
+        "kind",
+        "title",
+        "timing",
+        "detail",
+        "priority",
+        "confidence",
+        "source",
+        "is_tonight",
+    )
+)
+_RARE_EVENT_OPTIONAL_FIELDS = frozenset(
+    (
+        "starts_at",
+        "peaks_at",
+        "ends_at",
+        "direction",
+        "altitude_degrees",
+        "azimuth_degrees",
+        "separation_degrees",
+    )
+)
+_RARE_EVENT_STRING_LIMITS = {
+    "id": 100,
+    "title": 100,
+    "timing": 120,
+    "detail": 240,
+    "source": 100,
+}
+_LOWERCASE_HEXADECIMAL = frozenset("0123456789abcdef")
 
 _ALIASES = {
     "automatic": "automatic",
@@ -105,9 +145,175 @@ def _first_value(*values: Any, default: Any = None) -> Any:
     return default
 
 
-def _star_view_metadata(options: Mapping[str, Any]) -> dict[str, str]:
+def _aware_iso_timestamp(value: Any) -> str | None:
+    if (
+        not isinstance(value, str)
+        or value.strip() != value
+        or not value
+        or not value.isprintable()
+    ):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.isoformat()
+
+
+def _bounded_event_string(value: Any, maximum: int) -> str | None:
+    if (
+        not isinstance(value, str)
+        or value.strip() != value
+        or not 1 <= len(value) <= maximum
+        or not value.isprintable()
+    ):
+        return None
+    return value
+
+
+def _bounded_event_number(
+    value: Any,
+    minimum: float,
+    maximum: float,
+    *,
+    maximum_inclusive: bool = True,
+) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < minimum:
+        return None
+    if number > maximum or (not maximum_inclusive and number == maximum):
+        return None
+    return number
+
+
+def _normalized_rare_events(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list) or len(value) > 8:
+        return None
+    allowed = _RARE_EVENT_REQUIRED_FIELDS | _RARE_EVENT_OPTIONAL_FIELDS
+    normalized: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) - allowed:
+            return None
+        if not _RARE_EVENT_REQUIRED_FIELDS.issubset(raw):
+            return None
+
+        event: dict[str, Any] = {}
+        for key, maximum in _RARE_EVENT_STRING_LIMITS.items():
+            text = _bounded_event_string(raw.get(key), maximum)
+            if text is None:
+                return None
+            event[key] = text
+
+        kind = raw.get("kind")
+        confidence = raw.get("confidence")
+        priority = raw.get("priority")
+        is_tonight = raw.get("is_tonight")
+        if not isinstance(kind, str) or kind not in _RARE_EVENT_KINDS:
+            return None
+        if (
+            not isinstance(confidence, str)
+            or confidence not in _RARE_EVENT_CONFIDENCE
+        ):
+            return None
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= 100
+        ):
+            return None
+        if not isinstance(is_tonight, bool):
+            return None
+        event.update(
+            {
+                "kind": kind,
+                "priority": priority,
+                "confidence": confidence,
+                "is_tonight": is_tonight,
+            }
+        )
+
+        for key in ("starts_at", "peaks_at", "ends_at"):
+            if key not in raw:
+                continue
+            if raw[key] is None:
+                event[key] = None
+                continue
+            timestamp = _aware_iso_timestamp(raw[key])
+            if timestamp is None:
+                return None
+            event[key] = timestamp
+
+        if "direction" in raw:
+            direction = raw["direction"]
+            if (
+                not isinstance(direction, str)
+                or direction not in _RARE_EVENT_DIRECTIONS
+            ):
+                return None
+            event["direction"] = direction
+
+        number_fields = (
+            ("altitude_degrees", -90.0, 90.0, True),
+            ("azimuth_degrees", 0.0, 360.0, False),
+            ("separation_degrees", 0.0, 180.0, True),
+        )
+        for key, minimum, maximum, inclusive in number_fields:
+            if key not in raw:
+                continue
+            number = _bounded_event_number(
+                raw[key],
+                minimum,
+                maximum,
+                maximum_inclusive=inclusive,
+            )
+            if number is None:
+                return None
+            event[key] = number
+        normalized.append(event)
+    return normalized
+
+
+def _rare_event_view_metadata(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and bind one renderer event list to its canonical identity."""
+    events = _normalized_rare_events(options.get("star_rare_events"))
+    generated_at = _aware_iso_timestamp(
+        options.get("star_rare_events_generated_at")
+    )
+    claimed_digest = options.get("star_rare_events_digest")
+    if (
+        events is None
+        or generated_at is None
+        or not isinstance(claimed_digest, str)
+        or len(claimed_digest) != 64
+        or any(
+            character not in _LOWERCASE_HEXADECIMAL
+            for character in claimed_digest
+        )
+    ):
+        return {}
+    canonical = json.dumps(
+        events,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    computed_digest = hashlib.sha256(canonical).hexdigest()
+    if claimed_digest != computed_digest:
+        return {}
+    return {
+        "rare_events": events,
+        "rare_events_generated_at": generated_at,
+        "rare_events_digest": computed_digest,
+    }
+
+
+def _star_view_metadata(options: Mapping[str, Any]) -> dict[str, Any]:
     """Validate astronomy metadata emitted by the live star source."""
-    result: dict[str, str] = {}
+    result: dict[str, Any] = {}
     observation = options.get("star_observation_time")
     if isinstance(observation, str):
         try:
@@ -140,6 +346,7 @@ def _star_view_metadata(options: Mapping[str, Any]) -> dict[str, str]:
         and featured.isprintable()
     ):
         result["featured_constellation"] = featured
+    result.update(_rare_event_view_metadata(options))
     return result
 
 
@@ -907,6 +1114,14 @@ class FrameRuntime:
                 "longitude": cfg.longitude,
                 "direction": direction,
                 "timezone": cfg.timezone,
+                "sky_event_cache_path": str(
+                    (
+                        Path(os.environ["XDG_CACHE_HOME"]).expanduser()
+                        if os.environ.get("XDG_CACHE_HOME")
+                        else cfg.output_directory / ".cache"
+                    )
+                    / "sky-events-v1.json"
+                ),
                 "weather_style": cfg.weather_style,
                 "weather_scene_source": cfg.weather_scene_source,
                 "weather_environment": weather_environment.strip(),
@@ -1135,6 +1350,8 @@ class FrameRuntime:
                         "sunrise_time",
                         "night_date",
                         "featured_constellation",
+                        "rare_events_digest",
+                        "rare_events_generated_at",
                     )
                 )
             frame_valid = _native_file_is_valid(frame_path, checksum, result.eink_image.size)

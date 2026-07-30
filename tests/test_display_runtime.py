@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -14,7 +15,12 @@ from PIL import Image
 from display_control.demo import DemoOverrideStore
 from display_runtime.config import ConfigError, load_runtime_config
 from display_runtime.ee02 import EE02_PAYLOAD_BYTES, LandscapeRotation
-from display_runtime.runtime import FrameRuntime, SourcePolicyError, parse_render_time
+from display_runtime.runtime import (
+    FrameRuntime,
+    SourcePolicyError,
+    _star_view_metadata,
+    parse_render_time,
+)
 from display_simulator.models import Orientation
 from display_simulator.pipeline import ImagePipeline, checksum_image, validate_palette
 
@@ -46,6 +52,16 @@ class FailingSource:
 
     def render(self, _context):
         raise RuntimeError("deliberate source failure")
+
+
+def rare_events_digest(events) -> str:
+    payload = json.dumps(
+        events,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def config_for(directory: Path, **updates):
@@ -381,6 +397,230 @@ class FrameRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 second_manifest["view"]["featured_constellation"],
                 "Sagittarius",
+            )
+
+    def test_rare_event_metadata_is_strictly_validated_and_canonically_hashed(self):
+        event = {
+            "id": "perseids-2026",
+            "kind": "meteor",
+            "title": "Perseid meteor shower",
+            "timing": "Peaks after midnight",
+            "detail": "Look northeast after the Moon sets.",
+            "starts_at": "2026-08-12T21:00:00-06:00",
+            "peaks_at": "2026-08-13T02:30:00-06:00",
+            "ends_at": "2026-08-13T05:30:00-06:00",
+            "priority": 92,
+            "confidence": "high",
+            "source": "International Meteor Organization",
+            "direction": "NE",
+            "altitude_degrees": 48.25,
+            "azimuth_degrees": 42.0,
+            "separation_degrees": 180.0,
+            "is_tonight": True,
+        }
+        events = [
+            event,
+            {
+                "id": "aurora-watch-2026-08-12",
+                "kind": "aurora",
+                "title": "Aurora watch",
+                "timing": "Possible late tonight",
+                "detail": "A faint glow may be visible low on the northern horizon.",
+                "starts_at": None,
+                "priority": 75,
+                "confidence": "medium",
+                "source": "NOAA SWPC",
+                "is_tonight": True,
+            },
+        ]
+        options = {
+            "star_rare_events": events,
+            "star_rare_events_generated_at": "2026-08-12T18:05:00+00:00",
+            "star_rare_events_digest": rare_events_digest(events),
+        }
+
+        metadata = _star_view_metadata(options)
+
+        self.assertEqual(metadata["rare_events"], events)
+        self.assertEqual(
+            metadata["rare_events_generated_at"],
+            "2026-08-12T18:05:00+00:00",
+        )
+        self.assertEqual(
+            metadata["rare_events_digest"],
+            rare_events_digest(events),
+        )
+
+        invalid_cases = {
+            "too many events": [dict(event) for _ in range(9)],
+            "missing required field": {
+                key: value for key, value in event.items() if key != "title"
+            },
+            "unknown field": {**event, "unexpected": "value"},
+            "invalid kind": {**event, "kind": "comet"},
+            "non-string kind": {**event, "kind": []},
+            "untrimmed title": {**event, "title": " Meteor shower"},
+            "non-printable detail": {**event, "detail": "Line one\nLine two"},
+            "long source": {**event, "source": "s" * 101},
+            "naive timestamp": {
+                **event,
+                "peaks_at": "2026-08-13T02:30:00",
+            },
+            "boolean priority": {**event, "priority": True},
+            "large priority": {**event, "priority": 101},
+            "invalid confidence": {**event, "confidence": "certain"},
+            "invalid direction": {**event, "direction": "north"},
+            "low altitude": {**event, "altitude_degrees": -90.1},
+            "wrapped azimuth": {**event, "azimuth_degrees": 360},
+            "large separation": {**event, "separation_degrees": 180.1},
+            "numeric tonight": {**event, "is_tonight": 1},
+        }
+        for label, invalid in invalid_cases.items():
+            with self.subTest(label=label):
+                candidate_events = (
+                    invalid if isinstance(invalid, list) else [invalid]
+                )
+                candidate = {
+                    "star_rare_events": candidate_events,
+                    "star_rare_events_generated_at": options[
+                        "star_rare_events_generated_at"
+                    ],
+                    "star_rare_events_digest": rare_events_digest(candidate_events),
+                }
+                result = _star_view_metadata(candidate)
+                self.assertNotIn("rare_events", result)
+                self.assertNotIn("rare_events_generated_at", result)
+                self.assertNotIn("rare_events_digest", result)
+
+        for label, updates in {
+            "naive generated time": {
+                "star_rare_events_generated_at": "2026-08-12T18:05:00"
+            },
+            "uppercase digest": {
+                "star_rare_events_digest": options[
+                    "star_rare_events_digest"
+                ].upper()
+            },
+            "mismatched digest": {"star_rare_events_digest": "0" * 64},
+        }.items():
+            with self.subTest(label=label):
+                result = _star_view_metadata({**options, **updates})
+                self.assertNotIn("rare_events", result)
+                self.assertNotIn("rare_events_generated_at", result)
+                self.assertNotIn("rare_events_digest", result)
+
+    def test_star_manifest_rewrites_when_rare_event_digest_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            events = [
+                {
+                    "id": "venus-jupiter-2026",
+                    "kind": "conjunction",
+                    "title": "Venus and Jupiter meet",
+                    "timing": "Best around 9:30 PM",
+                    "detail": "The two bright planets appear close together.",
+                    "peaks_at": "2026-08-12T21:30:00-06:00",
+                    "priority": 88,
+                    "confidence": "high",
+                    "source": "JPL DE421",
+                    "direction": "W",
+                    "altitude_degrees": 24.0,
+                    "azimuth_degrees": 271.0,
+                    "separation_degrees": 1.2,
+                    "is_tonight": True,
+                }
+            ]
+            metadata = {
+                "star_observation_time": "2026-08-12T21:40:00-06:00",
+                "star_sunrise_time": "2026-08-13T06:34:00-06:00",
+                "star_night_date": "2026-08-12",
+                "star_featured_constellation": "Cygnus",
+                "star_rare_events": events,
+                "star_rare_events_generated_at": "2026-08-12T18:05:00+00:00",
+                "star_rare_events_digest": rare_events_digest(events),
+            }
+            runtime = FrameRuntime(
+                config,
+                source_factories={
+                    "star-map": lambda: StarMetadataSource(dict(metadata)),
+                },
+            )
+            when = parse_render_time("2026-08-12T12:00:00", config.timezone)
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "west"},
+            ):
+                first = runtime.render("star-map", when=when, allow_demo=True)
+            first_manifest = json.loads(
+                first.manifest_path.read_text(encoding="utf-8")
+            )
+            first_digest = first_manifest["view"]["rare_events_digest"]
+            self.assertEqual(first_manifest["view"]["rare_events"], events)
+
+            events[0]["separation_degrees"] = 0.6
+            events[0]["detail"] = "The two bright planets are exceptionally close."
+            metadata["star_rare_events_generated_at"] = (
+                "2026-08-12T18:20:00+00:00"
+            )
+            metadata["star_rare_events_digest"] = rare_events_digest(events)
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "west"},
+            ):
+                second = runtime.render("star-map", when=when, allow_demo=True)
+            second_manifest = json.loads(
+                second.manifest_path.read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(first.wire_checksum, second.wire_checksum)
+            self.assertTrue(second.changed)
+            self.assertTrue(second.written)
+            self.assertNotEqual(
+                first_digest,
+                second_manifest["view"]["rare_events_digest"],
+            )
+            self.assertEqual(
+                second_manifest["view"]["rare_events"][0]["separation_degrees"],
+                0.6,
+            )
+
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "west"},
+            ):
+                unchanged = runtime.render("star-map", when=when, allow_demo=True)
+            self.assertFalse(unchanged.changed)
+            self.assertFalse(unchanged.written)
+
+            # A Pi-only evening check must advance the website's freshness
+            # timestamp even when the ranked events and e-paper pixels match.
+            metadata["star_rare_events_generated_at"] = (
+                "2026-08-12T18:35:00+00:00"
+            )
+            with patch.object(
+                runtime,
+                "_control_settings",
+                return_value={"star_direction": "west"},
+            ):
+                freshness_only = runtime.render(
+                    "star-map",
+                    when=when,
+                    allow_demo=True,
+                )
+            refreshed_manifest = json.loads(
+                freshness_only.manifest_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(first.wire_checksum, freshness_only.wire_checksum)
+            self.assertTrue(freshness_only.changed)
+            self.assertTrue(freshness_only.written)
+            self.assertEqual(
+                refreshed_manifest["view"]["rare_events_generated_at"],
+                "2026-08-12T18:35:00+00:00",
             )
 
     def test_uploaded_photo_uses_photo_only_conversion(self):

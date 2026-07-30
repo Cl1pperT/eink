@@ -125,6 +125,80 @@ class ControlServerTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def rare_event(self, **updates):
+        event = {
+            "id": "perseids-2026",
+            "kind": "meteor",
+            "title": "Perseid meteor shower",
+            "timing": "Best after 11 PM",
+            "detail": "Look northeast and give your eyes twenty minutes to adjust.",
+            "starts_at": "2026-07-27T23:00:00-06:00",
+            "peaks_at": "2026-07-28T02:15:00-06:00",
+            "ends_at": "2026-07-28T05:00:00-06:00",
+            "priority": 92,
+            "confidence": "high",
+            "source": "American Meteor Society",
+            "direction": "NE",
+            "altitude_degrees": 38.5,
+            "azimuth_degrees": 42.25,
+            "separation_degrees": 1.2,
+            "is_tonight": True,
+        }
+        event.update(updates)
+        return event
+
+    def commit_star_preview(self, view_updates=None):
+        mode = self.root / "frames" / "star-map"
+        pixel_identity = "c" * 64
+        preview = mode / "frames" / f"{pixel_identity}.png"
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (40, 30), (20, 35, 80)).save(preview)
+        payload = preview.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        view = {
+            "direction_degrees": 90,
+            "direction_cardinal": "E",
+            "observation_time": "2026-07-27T22:18:00-06:00",
+            "sunrise_time": "2026-07-28T06:21:00-06:00",
+            "night_date": "2026-07-27",
+            "featured_constellation": "Cygnus",
+            "rare_events": [self.rare_event()],
+            "rare_events_generated_at": "2026-07-27T18:00:00-06:00",
+        }
+        if view_updates:
+            view.update(view_updates)
+        if not view_updates or "rare_events_digest" not in view_updates:
+            canonical_events = json.dumps(
+                view["rare_events"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            view["rare_events_digest"] = hashlib.sha256(canonical_events).hexdigest()
+        manifest = {
+            "schema_version": 2,
+            "format": "eink-frame-artifacts-v2",
+            "mode": "star-map",
+            "generated_at": "2026-07-27T12:00:00+00:00",
+            "rendered_for": "2026-07-27T21:30:00-06:00",
+            "dimensions": {"width": 40, "height": 30},
+            "pixel_checksum": {
+                "algorithm": "sha256-dimensions-rgb-v1",
+                "value": pixel_identity,
+            },
+            "view": view,
+            "files": {
+                "eink_png": {
+                    "path": f"frames/{pixel_identity}.png",
+                    "bytes": len(payload),
+                    "sha256": digest,
+                }
+            },
+        }
+        manifest_path = mode / "current.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest_path, payload, digest
+
     def test_mobile_page_catalog_and_security_headers(self):
         status, headers, body = self.request("GET", "/")
         self.assertEqual(status, 200)
@@ -133,6 +207,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(b"Nearby birds", body)
         self.assertIn(b'id="panel-stars"', body)
         self.assertIn(b'id="render-stars"', body)
+        self.assertIn(b'id="star-events-card"', body)
+        self.assertIn(b'id="star-event-list"', body)
+        self.assertIn(b'id="star-events-status"', body)
+        self.assertIn(b'aria-live="polite"', body)
         self.assertEqual(body.count(b"data-star-direction="), 4)
         self.assertIn(b'id="display-mode"', body)
         self.assertIn(b"Five-minute demo", body)
@@ -149,11 +227,24 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(b"hold any two frame buttons", body)
         self.assertIn(b"touch-action:none", self.request("GET", "/app.css")[2])
         app_js = self.request("GET", "/app.js")[2]
+        self.assertIn(b"function renderStarEvents", app_js)
+        self.assertIn(b"visible.some(shown=>shown.kind===event.kind)", app_js)
+        self.assertIn(b"visible.length<3", app_js)
+        event_renderer = app_js[
+            app_js.index(b"function renderStarEvents"):
+            app_js.index(b"function renderStarSummary")
+        ]
+        self.assertIn(b"document.createElement", event_renderer)
+        self.assertIn(b"textContent", event_renderer)
+        self.assertNotIn(b"innerHTML", event_renderer)
         self.assertIn(b"Date.now()<=sunriseTime", app_js)
         self.assertIn(b"startPhotoDrag", app_js)
         self.assertIn(b"waitForRenderCompletion", app_js)
         self.assertIn(b"/api/photo/display", app_js)
         self.assertIn(b"Image demo active \xc2\xb7 hold any two frame buttons", app_js)
+        app_css = self.request("GET", "/app.css")[2]
+        self.assertIn(b".star-events-card", app_css)
+        self.assertIn(b".star-event-list", app_css)
         self.assertLess(
             app_js.index(b"waitForRenderCompletion('uploaded-photo')"),
             app_js.index(b"api('/api/photo/display"),
@@ -258,45 +349,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/birds/preview")[0], 404)
 
     def test_star_summary_and_preview_report_the_committed_cardinal_view(self):
-        mode = self.root / "frames" / "star-map"
-        pixel_identity = "c" * 64
-        preview = mode / "frames" / f"{pixel_identity}.png"
-        preview.parent.mkdir(parents=True)
-        Image.new("RGB", (40, 30), (20, 35, 80)).save(preview)
-        payload = preview.read_bytes()
-        digest = hashlib.sha256(payload).hexdigest()
-        (mode / "current.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "format": "eink-frame-artifacts-v2",
-                    "mode": "star-map",
-                    "generated_at": "2026-07-27T12:00:00+00:00",
-                    "rendered_for": "2026-07-27T21:30:00-06:00",
-                    "dimensions": {"width": 40, "height": 30},
-                    "pixel_checksum": {
-                        "algorithm": "sha256-dimensions-rgb-v1",
-                        "value": pixel_identity,
-                    },
-                    "view": {
-                        "direction_degrees": 90,
-                        "direction_cardinal": "E",
-                        "observation_time": "2026-07-27T22:18:00-06:00",
-                        "sunrise_time": "2026-07-28T06:21:00-06:00",
-                        "night_date": "2026-07-27",
-                        "featured_constellation": "Cygnus",
-                    },
-                    "files": {
-                        "eink_png": {
-                            "path": f"frames/{pixel_identity}.png",
-                            "bytes": len(payload),
-                            "sha256": digest,
-                        }
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
+        manifest_path, payload, digest = self.commit_star_preview()
 
         status, _headers, body = self.request("GET", "/api/stars/summary")
         self.assertEqual(status, 200)
@@ -309,6 +362,25 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(summary["sunrise_time"], "2026-07-28T06:21:00-06:00")
         self.assertEqual(summary["night_date"], "2026-07-27")
         self.assertEqual(summary["featured_constellation"], "Cygnus")
+        self.assertEqual(summary["rare_events_generated_at"], "2026-07-27T18:00:00-06:00")
+        expected_event_digest = hashlib.sha256(
+            json.dumps(
+                [self.rare_event()],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(summary["rare_events_digest"], expected_event_digest)
+        self.assertEqual(len(summary["rare_events"]), 1)
+        event = summary["rare_events"][0]
+        self.assertEqual(event["id"], "perseids-2026")
+        self.assertEqual(event["kind"], "meteor")
+        self.assertEqual(event["direction"], "NE")
+        self.assertEqual(event["altitude_degrees"], 38.5)
+        self.assertEqual(event["azimuth_degrees"], 42.25)
+        self.assertEqual(event["separation_degrees"], 1.2)
+        self.assertTrue(event["is_tonight"])
 
         status, headers, body = self.request("GET", "/api/stars/preview")
         self.assertEqual(status, 200)
@@ -323,10 +395,117 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 304)
         self.assertEqual(body, b"")
 
-        manifest = json.loads((mode / "current.json").read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["files"]["eink_png"]["sha256"] = "d" * 64
-        (mode / "current.json").write_text(json.dumps(manifest), encoding="utf-8")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         self.assertEqual(self.request("GET", "/api/stars/preview")[0], 404)
+
+    def test_star_summary_without_committed_art_has_empty_event_metadata(self):
+        status, _headers, body = self.request("GET", "/api/stars/summary")
+
+        self.assertEqual(status, 200)
+        summary = json.loads(body)
+        self.assertFalse(summary["preview_available"])
+        self.assertEqual(summary["rare_events"], [])
+        self.assertIsNone(summary["rare_events_generated_at"])
+        self.assertIsNone(summary["rare_events_digest"])
+
+    def test_legacy_committed_star_map_remains_available_without_event_metadata(self):
+        manifest_path, payload, _digest = self.commit_star_preview()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["view"].pop("rare_events")
+        manifest["view"].pop("rare_events_generated_at")
+        manifest["view"].pop("rare_events_digest")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        status, _headers, body = self.request("GET", "/api/stars/summary")
+
+        self.assertEqual(status, 200)
+        summary = json.loads(body)
+        self.assertTrue(summary["preview_available"])
+        self.assertEqual(summary["rare_events"], [])
+        self.assertIsNone(summary["rare_events_generated_at"])
+        self.assertIsNone(summary["rare_events_digest"])
+        self.assertEqual(self.request("GET", "/api/stars/preview")[2], payload)
+
+    def test_star_event_timestamps_may_be_null_or_omitted(self):
+        event = self.rare_event(starts_at=None, kind="aurora", id="aurora-watch")
+        event.pop("peaks_at")
+        event.pop("ends_at")
+        self.commit_star_preview({"rare_events": [event]})
+
+        status, _headers, body = self.request("GET", "/api/stars/summary")
+
+        self.assertEqual(status, 200)
+        returned = json.loads(body)["rare_events"][0]
+        self.assertIsNone(returned["starts_at"])
+        self.assertNotIn("peaks_at", returned)
+        self.assertNotIn("ends_at", returned)
+
+    def test_untrusted_star_event_metadata_cannot_be_exposed_as_a_preview(self):
+        def unknown_field(manifest):
+            manifest["view"]["rare_events"][0]["html"] = "<img src=x onerror=alert(1)>"
+
+        def naive_timestamp(manifest):
+            manifest["view"]["rare_events"][0]["starts_at"] = "2026-07-27T23:00:00"
+
+        def invalid_priority(manifest):
+            manifest["view"]["rare_events"][0]["priority"] = True
+
+        def unhashable_kind(manifest):
+            manifest["view"]["rare_events"][0]["kind"] = ["meteor"]
+
+        def invalid_azimuth(manifest):
+            manifest["view"]["rare_events"][0]["azimuth_degrees"] = 360
+
+        def overflowing_altitude(manifest):
+            manifest["view"]["rare_events"][0]["altitude_degrees"] = 10**1000
+
+        def too_many(manifest):
+            base = manifest["view"]["rare_events"][0]
+            manifest["view"]["rare_events"] = [
+                {**base, "id": f"meteor-{index}"} for index in range(9)
+            ]
+
+        def duplicate_ids(manifest):
+            event = dict(manifest["view"]["rare_events"][0])
+            manifest["view"]["rare_events"].append(event)
+
+        def incomplete_metadata(manifest):
+            manifest["view"].pop("rare_events_digest")
+
+        def uppercase_digest(manifest):
+            manifest["view"]["rare_events_digest"] = "A" * 64
+
+        def mismatched_digest(manifest):
+            manifest["view"]["rare_events_digest"] = "0" * 64
+
+        cases = {
+            "unknown field": unknown_field,
+            "naive timestamp": naive_timestamp,
+            "boolean priority": invalid_priority,
+            "unhashable kind": unhashable_kind,
+            "exclusive azimuth bound": invalid_azimuth,
+            "overflowing altitude": overflowing_altitude,
+            "more than eight": too_many,
+            "duplicate ids": duplicate_ids,
+            "incomplete metadata": incomplete_metadata,
+            "uppercase digest": uppercase_digest,
+            "mismatched digest": mismatched_digest,
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                manifest_path, _payload, _digest = self.commit_star_preview()
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mutate(manifest)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                status, _headers, body = self.request("GET", "/api/stars/summary")
+                self.assertEqual(status, 200)
+                summary = json.loads(body)
+                self.assertFalse(summary["preview_available"])
+                self.assertEqual(summary["rare_events"], [])
+                self.assertEqual(self.request("GET", "/api/stars/preview")[0], 404)
 
     def test_public_settings_mutation_validates_before_saving(self):
         settings = default_settings(self.catalog)

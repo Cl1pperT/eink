@@ -8,6 +8,7 @@ from datetime import date, datetime
 import hashlib
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -57,6 +58,11 @@ MAX_ILLUSTRATION_BYTES = 16 * 1024 * 1024
 RENDERABLE_MODES = DEMO_MODES
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _BIRD_SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?")
+_RARE_EVENT_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,126}[A-Za-z0-9])?")
+_RARE_EVENT_KINDS = frozenset(("meteor", "aurora", "eclipse", "satellite", "conjunction"))
+_RARE_EVENT_CONFIDENCE = frozenset(("high", "medium", "low"))
+_RARE_EVENT_DIRECTIONS = frozenset(("N", "NE", "E", "SE", "S", "SW", "W", "NW"))
+_RARE_EVENT_LIMIT = 8
 
 INDEX_HTML = r"""<!doctype html>
 <html lang="en">
@@ -165,6 +171,16 @@ INDEX_HTML = r"""<!doctype html>
 
     <section id="panel-stars" class="panel" aria-labelledby="stars-title">
       <div class="section-heading"><div><p class="eyebrow">Tonight overhead</p><h2 id="stars-title">Star map</h2><p>Choose the direction you will face. The circular atlas places it at the bottom and charts the full visible sky for 90 minutes after sunset.</p></div></div>
+      <article id="star-events-card" class="card star-events-card" aria-labelledby="star-events-title">
+        <div class="card-title">
+          <div><p class="eyebrow">Rare event guide</p><h3 id="star-events-title">Sky events</h3></div>
+          <span id="star-events-status" class="freshness loading" role="status" aria-live="polite" aria-atomic="true">Checking</span>
+        </div>
+        <p id="star-events-intro" class="star-events-intro">Checking the latest committed sky guide for unusual sights…</p>
+        <ol id="star-event-list" class="star-event-list" aria-label="Rare sky events"></ol>
+        <p id="star-events-empty" class="star-events-empty hidden">No rare events are highlighted in this sky guide.</p>
+        <p id="star-events-source" class="star-events-source"></p>
+      </article>
       <article class="card star-mini">
         <div class="star-preview-shell">
           <img id="star-frame-preview" class="hidden" alt="Latest star map artwork rendered for the e-ink frame">
@@ -284,10 +300,11 @@ APP_CSS = r"""
 .location-card.scene-0{--scene-a:#b9d7d4;--scene-b:#728b68;--mountain:#4b6952}.location-card.scene-1{--scene-a:#efc18c;--scene-b:#be674a;--mountain:#71423a}.location-card.scene-2{--scene-a:#e9b598;--scene-b:#a95842;--mountain:#6e473e}.location-card.scene-3{--scene-a:#bdd7dc;--scene-b:#728d87;--mountain:#496c63}.location-card.scene-4{--scene-a:#a8d9d6;--scene-b:#789a91;--mountain:#4b7068}.toast.error{background:#843c31}
 .tabs{grid-template-columns:repeat(6,1fr)}.card-title{gap:12px}.render-row{display:flex;align-items:center;gap:16px;margin-top:17px;padding-top:15px;border-top:1px solid #e4e6dc}.render-row p{margin:0;flex:1;font-size:12px}.inline-primary,.gallery-link{border:0;border-radius:12px;background:var(--forest);color:#fff;font-weight:800;text-decoration:none;padding:11px 14px;cursor:pointer;white-space:nowrap}.inline-primary:disabled{opacity:.45;cursor:not-allowed}.bird-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(260px,.85fr);gap:20px}.bird-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:linear-gradient(145deg,#e8eee4,#d5dfd1);display:grid;place-items:center;border:1px solid #d5dccf}.bird-preview-shell>*{grid-area:1/1}.bird-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.bird-preview-empty{text-align:center;color:#6d7c70;padding:20px}.bird-preview-empty span{display:block;font-size:42px;margin-bottom:8px}.bird-preview-empty p{font-size:12px;line-height:1.4;margin:0}.bird-mini-copy{align-self:center}.freshness,.provider-chip{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;font-size:9px;letter-spacing:.08em;font-weight:850;white-space:nowrap}.freshness{background:#e4eee3;color:#356246}.freshness.stale{background:#f3e4c8;color:#855b19}.freshness.loading{background:#e9e7df;color:#6d7069}.freshness.unavailable{background:#f4dfda;color:#843c31}.provider-chip{background:#e8eee4;color:#346051}.bird-mini-list{list-style:none;padding:0;margin:12px 0 18px;display:grid;gap:8px}.bird-mini-list li{display:grid;grid-template-columns:1fr auto;gap:10px;border-bottom:1px solid #e5e7df;padding:0 0 8px;font-size:13px}.bird-mini-list b{font-weight:750}.bird-mini-list span{color:#718075;font-size:11px}.gallery-link{display:inline-flex;align-items:center;justify-content:space-between;gap:18px}.gallery-link span{font-size:18px}
 .star-mini{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr);gap:22px;background:linear-gradient(145deg,#fffdf8 50%,#eef0e9)}.star-preview-shell{aspect-ratio:4/3;border-radius:16px;overflow:hidden;background:radial-gradient(circle at 50% 110%,#263e46,#13242e 58%,#0d1720);display:grid;place-items:center;border:1px solid #293f46}.star-preview-shell>*{grid-area:1/1}.star-preview-shell img{width:100%;height:100%;object-fit:contain;background:#f4f0e5}.star-preview-empty{text-align:center;color:#d5dfd3;padding:20px}.star-preview-empty span{display:block;color:#f0bd51;font-size:46px;margin-bottom:8px}.star-preview-empty p{font-size:12px;line-height:1.4;margin:0}.star-mini-copy{align-self:center}.direction-field{border-top:1px solid #e2e5dc;margin-top:17px;padding-top:15px}.direction-label{display:block;font-size:12px;font-weight:800;margin-bottom:9px}.compass-picker{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.compass-picker button{appearance:none;border:1px solid #cdd5ca;background:#fff;border-radius:12px;min-height:63px;padding:7px 4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}.compass-picker b{font:600 22px/1 Georgia,serif}.compass-picker small{font-size:9px;color:#748075}.compass-picker button.active{background:#173b35;border-color:#173b35;color:#fff;box-shadow:0 5px 14px #173b3533}.compass-picker button.active small{color:#dce8df}.star-actions{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:15px}.outline-button{border:1px solid #7c9587;border-radius:12px;background:#fff;color:var(--forest);font-weight:800;padding:10px 12px;cursor:pointer}.outline-button:disabled{opacity:.43;cursor:not-allowed}
+.star-events-card{position:relative;overflow:hidden;color:#f8fbf6;background:radial-gradient(circle at 92% -20%,#425d54 0,transparent 48%),linear-gradient(145deg,#10262c,#152e34);border-color:#29434a}.star-events-card::after{content:"✦";position:absolute;right:20px;top:42px;color:#e7ad5226;font:110px/1 Georgia,serif;pointer-events:none}.star-events-card .card-title{position:relative;z-index:1;margin-bottom:8px}.star-events-card .eyebrow{color:#e2bf77}.star-events-card .freshness{background:#ffffff18;color:#e9eee9}.star-events-card .freshness.fresh{background:#e7ad52;color:#32250e}.star-events-card .freshness.stale{background:#e7ad5233;color:#f4dca8}.star-events-card .freshness.unavailable{background:#ffffff12;color:#c9d3ce}.star-events-intro{position:relative;z-index:1;margin:0 0 14px;color:#c9d5d0;font-size:12px;line-height:1.45}.star-event-list{position:relative;z-index:1;list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:9px}.star-event{min-width:0;display:grid;grid-template-columns:34px 1fr;gap:10px;padding:13px;border:1px solid #ffffff24;border-radius:14px;background:#07181c80}.star-event.tonight{border-color:#e7ad5288;background:#513b161f}.star-event-icon{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:#ffffff12;color:#fff;font:20px/1 Georgia,serif}.star-event.tonight .star-event-icon{background:#e7ad52;color:#2d220d}.star-event-copy{min-width:0}.star-event-heading{display:flex;align-items:flex-start;gap:7px}.star-event-heading b{font-size:14px;line-height:1.25;flex:1}.star-event-chip{flex:none;border:1px solid #ffffff35;border-radius:99px;padding:3px 5px;color:#dbe4df;font-size:7px;line-height:1.2;font-weight:850;letter-spacing:.08em}.star-event.tonight .star-event-chip{border-color:#e7ad52;color:#f4d28d}.star-event-time{display:block;margin-top:5px;color:#f0d28f;font-size:11px;font-weight:750}.star-event-detail{margin:5px 0 0;color:#d0dbd6;font-size:11px;line-height:1.4}.star-event-facts{margin:7px 0 0;color:#9fb1a9;font-size:9px;line-height:1.35;text-transform:uppercase;letter-spacing:.06em}.star-events-empty{position:relative;z-index:1;margin:0;padding:13px;border:1px solid #ffffff1f;border-radius:14px;background:#07181c66;color:#d5ded9;font-size:12px}.star-events-source{position:relative;z-index:1;margin:12px 0 0;color:#94a8a0;font-size:9px;line-height:1.4}.star-events-source:empty{display:none}
 .demo-intro{font-size:13px;margin:-4px 0 16px}.demo-badge{display:inline-flex;align-items:center;border-radius:99px;padding:6px 9px;background:#e9e7df;color:#6d7069;font-size:9px;letter-spacing:.08em;font-weight:850;text-transform:uppercase;white-space:nowrap}.demo-badge.active{background:#f4dfaa;color:#795612}.demo-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.demo-option{appearance:none;border:1px solid #d8ddd2;border-radius:15px;background:#fbfcf8;min-height:105px;padding:13px 9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;transition:.18s}.demo-option span{font-size:25px;color:var(--forest);line-height:1}.demo-option b{font-size:13px}.demo-option small{font-size:10px;color:#748075}.demo-option:hover{border-color:#7c9a8b;transform:translateY(-1px)}.demo-option.active{background:var(--forest);border-color:var(--forest);color:#fff;box-shadow:0 6px 16px #1d514533}.demo-option.active span,.demo-option.active small{color:#fff}.demo-option:disabled{opacity:.42;cursor:not-allowed;transform:none}.demo-active{margin-top:13px;border-radius:14px;background:#f5e8c7;padding:12px 13px;display:flex;align-items:center;gap:12px}.demo-active div{display:flex;flex-direction:column;gap:2px;flex:1}.demo-active small{color:#78633d;font-variant-numeric:tabular-nums}.demo-cancel{border:1px solid #c9aa68;background:#fff9eb;border-radius:10px;padding:8px 10px;font-size:11px;font-weight:800;cursor:pointer}.demo-cancel:disabled{opacity:.45;cursor:not-allowed}
 .photo-editor{min-width:0}.photo-preview{position:relative;display:block;touch-action:none;cursor:grab;border-style:solid;user-select:none}.photo-preview.dragging{cursor:grabbing}.photo-preview canvas{display:block;width:100%;height:100%;aspect-ratio:4/3;background:#e9ece4}.photo-preview-empty{position:absolute;inset:0;display:grid;place-content:center;gap:6px;color:#718074;pointer-events:none}.photo-preview-empty span{font-size:37px}.photo-preview-empty p{font-size:13px;margin:0}.crop-label{position:absolute;left:9px;top:9px;border-radius:99px;padding:5px 7px;background:#172f2ac9;color:#fff;font-size:8px;font-weight:850;letter-spacing:.12em;pointer-events:none}.battery-safe-mark{position:absolute;right:10px;bottom:7px;color:#fff;font:italic 11px Georgia,serif;text-shadow:0 1px 3px #000,0 0 7px #000;pointer-events:none}.empty-preview .crop-label,.empty-preview .battery-safe-mark{display:none}.crop-helper{margin:10px 2px 16px;text-align:left}.crop-controls{display:grid;grid-template-columns:1fr auto;align-items:end;gap:14px;margin-top:18px;padding-top:17px;border-top:1px solid #e4e6dc}.crop-zoom output{float:right;font-variant-numeric:tabular-nums}.crop-controls .outline-button{min-height:44px}.photo-display-card{background:linear-gradient(145deg,#fffdf8,#eef3e9)}.photo-duration-row{display:grid;grid-template-columns:minmax(155px,.65fr) 1fr;align-items:end;gap:14px}.duration-presets{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}.duration-presets button{appearance:none;min-height:45px;border:1px solid #ccd4c8;background:#fff;border-radius:11px;font-size:11px;font-weight:800;cursor:pointer}.duration-presets button.active{background:var(--forest);border-color:var(--forest);color:#fff}.photo-display-action{width:100%;margin-top:16px;min-height:48px}.photo-display-card>.demo-active{margin-top:13px}.photo-display-card>.helper{margin-bottom:0}
 @media(max-width:640px){.hero{padding-left:17px;padding-right:17px}.pill{font-size:0;padding:9px}.pill i{margin:0}.hero-copy .eyebrow{font-size:9px}.stat-grid{gap:7px}.stat{padding:13px 11px}.stat strong{font-size:21px}.stat small{font-size:10px}.field-grid{grid-template-columns:1fr}.field.span-2{grid-column:auto}.field-switch{margin-top:4px}.location-grid{grid-template-columns:1fr}.location-card{min-height:155px}.activity-toolbar{top:78px;margin-left:-3px;margin-right:-3px}.save-bar{padding-left:13px}.save-bar span b{display:none}.secondary-button{padding-left:8px;padding-right:8px}.metric-head,.metric-row{grid-template-columns:122px repeat(5,66px) 62px}}
-@media(max-width:700px){.tabs{display:flex;overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity}.tabs::-webkit-scrollbar{display:none}.tab{font-size:9px;flex:0 0 76px;scroll-snap-align:start}.tab span{font-size:17px}.bird-mini,.star-mini{grid-template-columns:1fr}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}.star-actions{grid-template-columns:1fr}.demo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.demo-option{min-height:96px}.photo-duration-row{grid-template-columns:1fr}.duration-presets button{min-height:44px}.crop-controls{grid-template-columns:1fr}.crop-controls .outline-button{width:100%}}
+@media(max-width:700px){.tabs{display:flex;overflow-x:auto;scrollbar-width:none;scroll-snap-type:x proximity}.tabs::-webkit-scrollbar{display:none}.tab{font-size:9px;flex:0 0 76px;scroll-snap-align:start}.tab span{font-size:17px}.bird-mini,.star-mini{grid-template-columns:1fr}.star-event-list{grid-template-columns:1fr}.star-events-card::after{right:-12px;top:55px}.render-row{align-items:stretch;flex-direction:column}.inline-primary{width:100%}.star-actions{grid-template-columns:1fr}.demo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.demo-option{min-height:96px}.photo-duration-row{grid-template-columns:1fr}.duration-presets button{min-height:44px}.crop-controls{grid-template-columns:1fr}.crop-controls .outline-button{width:100%}}
 @media(min-width:780px){.tabs{width:760px}.panel{padding-top:5px}.photo-card{display:grid;grid-template-columns:1.25fr .75fr;gap:18px;align-items:center}.photo-card .photo-editor{grid-row:span 2}.photo-preview{margin:0}.location-grid{grid-template-columns:repeat(3,1fr)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 """
@@ -301,6 +318,8 @@ APP_JS = r"""
   const demoLabels={weather:'Weather',birds:'Birds','star-map':'Stars','uploaded-photo':'Image'};
   const starDirectionLabels={north:'North',east:'East',south:'South',west:'West'};
   const starDirectionCardinals={north:'N',east:'E',south:'S',west:'W'};
+  const starEventLabels={meteor:'Meteor shower',aurora:'Aurora',eclipse:'Eclipse',satellite:'Satellite pass',conjunction:'Planetary conjunction'};
+  const starEventIcons={meteor:'✦',aurora:'⌁',eclipse:'◐',satellite:'↗',conjunction:'••'};
   let catalog=null, settings=null, baseline='', photoAvailable=false, birdSummaryTimer=null, starSummaryTimer=null, starSummary=null, renderPollTimer=null, demoState=null, demoDeadline=0, demoTimer=null, demoBusy=false;
   let photoEditorImage=null,photoObjectUrl='',photoDrag=null,photoDrawFrame=null,photoUploadBusy=false,photoDisplayBusy=false;
 
@@ -439,6 +458,37 @@ APP_JS = r"""
   function renderedDate(value){
     if(!value)return null;const date=new Date(value);return Number.isNaN(date.getTime())?null:date.toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
   }
+  function renderStarEvents(data){
+    const events=Array.isArray(data.rare_events)?[...data.rare_events]:[],available=Boolean(data.preview_available),guideAvailable=Boolean(data.rare_events_generated_at&&data.rare_events_digest),list=$('#star-event-list'),empty=$('#star-events-empty'),status=$('#star-events-status'),intro=$('#star-events-intro'),source=$('#star-events-source');
+    events.sort((a,b)=>Number(Boolean(b.is_tonight))-Number(Boolean(a.is_tonight))||(Number(b.priority)||0)-(Number(a.priority)||0)||String(a.title).localeCompare(String(b.title)));
+    const visible=[];events.forEach(event=>{if(visible.length<3&&(visible.length<2||!visible.some(shown=>shown.kind===event.kind)))visible.push(event)});events.forEach(event=>{if(visible.length<3&&!visible.includes(event))visible.push(event)});const tonight=events.filter(event=>event.is_tonight).length;list.replaceChildren();
+    visible.forEach(event=>{
+      const item=document.createElement('li');item.className=`star-event${event.is_tonight?' tonight':''}`;
+      const icon=document.createElement('span');icon.className='star-event-icon';icon.setAttribute('aria-hidden','true');icon.textContent=starEventIcons[event.kind]||'✦';
+      const copy=document.createElement('div');copy.className='star-event-copy';
+      const heading=document.createElement('div');heading.className='star-event-heading';
+      const title=document.createElement('b');title.textContent=event.title;
+      const chip=document.createElement('span');chip.className='star-event-chip';chip.textContent=event.is_tonight?'TONIGHT':'UPCOMING';
+      heading.append(title,chip);
+      const eventTimestamp=event.peaks_at||event.starts_at||event.ends_at||null,timing=document.createElement(eventTimestamp?'time':'span');timing.className='star-event-time';timing.textContent=event.timing;if(eventTimestamp)timing.setAttribute('datetime',eventTimestamp);
+      const detail=document.createElement('p');detail.className='star-event-detail';detail.textContent=event.detail;
+      const facts=[starEventLabels[event.kind]||'Sky event'];
+      if(event.direction)facts.push(`Face ${event.direction}`);
+      if(Number.isFinite(event.altitude_degrees))facts.push(`${Math.round(event.altitude_degrees)}° altitude`);
+      if(Number.isFinite(event.separation_degrees))facts.push(`${event.separation_degrees<1?event.separation_degrees.toFixed(1):Math.round(event.separation_degrees)}° apart`);
+      facts.push(`${event.confidence} confidence`);
+      const factLine=document.createElement('p');factLine.className='star-event-facts';factLine.textContent=facts.join(' · ');
+      copy.append(heading,timing,detail,factLine);item.append(icon,copy);list.append(item);
+    });
+    empty.classList.toggle('hidden',visible.length>0);
+    if(!available){status.textContent='Awaiting map';status.className='freshness unavailable';intro.textContent='Render tonight’s sky to check for meteor showers, aurora, eclipses, bright satellite passes, and close conjunctions.';empty.textContent='No committed sky guide is available yet.'}
+    else if(!guideAvailable){status.textContent='Needs refresh';status.className='freshness stale';intro.textContent='This saved map predates rare-event notes. Render tonight’s sky to add the event guide.';empty.textContent='Refresh the star map to check tonight’s rare events.'}
+    else if(events.length){status.textContent=tonight?`${tonight} tonight`:`${events.length} upcoming`;status.className=`freshness ${tonight?'fresh':'stale'}`;intro.textContent=tonight?'A rare sight is included in the latest frame. Start with tonight’s highlighted events.':'The latest frame includes these upcoming sights.';empty.textContent='No rare events are highlighted in this sky guide.'}
+    else{status.textContent='Quiet sky';status.className='freshness unavailable';intro.textContent='The latest committed guide has no unusual event to call out.';empty.textContent='No rare events are highlighted in this sky guide.'}
+    const generated=renderedDate(data.rare_events_generated_at),sources=[...new Set(events.map(event=>event.source).filter(Boolean))];
+    const shown=events.length>visible.length?`Showing ${visible.length} of ${events.length}. `:'';source.textContent=available&&guideAvailable?`${shown}${generated?`Event guide updated ${generated}. `:''}${sources.length?`Sources: ${sources.join(', ')}.`:'Event notes are saved with each committed star map.'}`:'';
+    const image=$('#star-frame-preview');image.alt=events.length?`Latest star map artwork featuring ${events[0].title}`:'Latest star map artwork rendered for the e-ink frame';
+  }
   function renderStarSummary(data){
     starSummary=data;const selected=settings.stars.direction,selectedCardinal=starDirectionCardinals[selected],selectedLabel=starDirectionLabels[selected];
     const available=Boolean(data.preview_available),directionMatches=available&&data.rendered_direction===selectedCardinal,renderedTime=new Date(data.rendered_for||'').getTime(),age=Date.now()-renderedTime,observationTime=new Date(data.observation_time||'').getTime(),sunriseTime=new Date(data.sunrise_time||'').getTime(),freshSky=Number.isFinite(sunriseTime)?Number.isFinite(renderedTime)&&age>=-900000&&Date.now()<=sunriseTime:Number.isFinite(renderedTime)&&age>=-900000&&age<=43200000,ready=directionMatches&&freshSky;
@@ -450,12 +500,13 @@ APP_JS = r"""
     else if(available&&renderedLabel)$('#star-source-copy').textContent=`The latest full-sky atlas faces ${renderedLabel}${skyStamp?` and is charted for ${skyStamp}`:''}. Render again to place ${selectedLabel} at the bottom.`;
     else if(available)$('#star-source-copy').textContent=`A saved star map is available${stamp?` from ${stamp}`:''}, but its direction predates tracking. Render the selected ${selectedLabel} orientation to update it.`;
     else $('#star-source-copy').textContent=`No committed star map yet. Render the ${selectedLabel} view to create one.`;
+    renderStarEvents(data);
     const demo=$('#demo-stars');demo.dataset.ready=String(ready);demo.title=ready?'Temporarily select this rendered map':directionMatches?'Render tonight’s current sky first':'Render the selected direction first';renderDemo();
   }
   async function loadStarSummary(){
     clearTimeout(starSummaryTimer);
     try{renderStarSummary(await api('/api/stars/summary'));starSummaryTimer=setTimeout(loadStarSummary,300000)}
-    catch(error){renderStarSummary({preview_available:false,preview_etag:null,preview_generated_at:null,rendered_for:null,rendered_direction:null});$('#star-source-copy').textContent=`Star preview unavailable: ${error.message}`;starSummaryTimer=setTimeout(loadStarSummary,60000)}
+    catch(error){renderStarSummary({preview_available:false,preview_etag:null,preview_generated_at:null,rendered_for:null,rendered_direction:null,rare_events:[],rare_events_generated_at:null,rare_events_digest:null});$('#star-source-copy').textContent=`Star preview unavailable: ${error.message}`;starSummaryTimer=setTimeout(loadStarSummary,60000)}
   }
   function updateRenderButton(){
     const button=$('#render-selected');if(!button||!settings)return;const automatic=settings.display.mode==='automatic';
@@ -856,6 +907,9 @@ class CommittedPreview:
     sunrise_time: str | None
     night_date: str | None
     featured_constellation: str | None
+    rare_events: tuple[dict[str, Any], ...]
+    rare_events_generated_at: str | None
+    rare_events_digest: str | None
     recipe_sha256: str | None
 
 
@@ -906,6 +960,160 @@ def _canonical_date(value: Any) -> str | None:
         return date.fromisoformat(value).isoformat()
     except ValueError:
         return None
+
+
+def _rare_event_text(value: Any, field: str, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or value.strip() != value
+        or not 1 <= len(value) <= maximum
+        or not value.isprintable()
+    ):
+        raise ValueError(f"Rare event {field} is invalid")
+    return value
+
+
+def _rare_event_timestamp(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 80:
+        raise ValueError(f"Rare event {field} is invalid")
+    canonical = _canonical_timestamp(value)
+    if canonical is None:
+        raise ValueError(f"Rare event {field} must be an aware timestamp")
+    return canonical
+
+
+def _rare_event_number(
+    value: Any,
+    field: str,
+    minimum: float,
+    maximum: float,
+) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Rare event {field} is invalid")
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError(f"Rare event {field} is invalid") from None
+    if not math.isfinite(numeric) or not minimum <= numeric <= maximum:
+        raise ValueError(f"Rare event {field} is out of range")
+    return value
+
+
+def _validate_rare_event(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("Rare event must be an object")
+    required = {
+        "id",
+        "kind",
+        "title",
+        "timing",
+        "detail",
+        "priority",
+        "confidence",
+        "source",
+        "is_tonight",
+    }
+    timestamps = {"starts_at", "peaks_at", "ends_at"}
+    optional = {
+        "direction",
+        "altitude_degrees",
+        "azimuth_degrees",
+        "separation_degrees",
+    }
+    if not required.issubset(value) or not set(value).issubset(required | timestamps | optional):
+        raise ValueError("Rare event has unknown or missing fields")
+
+    event_id = value["id"]
+    if not isinstance(event_id, str) or _RARE_EVENT_ID_RE.fullmatch(event_id) is None:
+        raise ValueError("Rare event id is invalid")
+    kind = value["kind"]
+    if not isinstance(kind, str) or kind not in _RARE_EVENT_KINDS:
+        raise ValueError("Rare event kind is invalid")
+    confidence = value["confidence"]
+    if not isinstance(confidence, str) or confidence not in _RARE_EVENT_CONFIDENCE:
+        raise ValueError("Rare event confidence is invalid")
+    priority = value["priority"]
+    if type(priority) is not int or not 0 <= priority <= 100:
+        raise ValueError("Rare event priority is invalid")
+    is_tonight = value["is_tonight"]
+    if type(is_tonight) is not bool:
+        raise ValueError("Rare event is_tonight is invalid")
+
+    event: dict[str, Any] = {
+        "id": event_id,
+        "kind": kind,
+        "title": _rare_event_text(value["title"], "title", 120),
+        "timing": _rare_event_text(value["timing"], "timing", 160),
+        "detail": _rare_event_text(value["detail"], "detail", 320),
+        "priority": priority,
+        "confidence": confidence,
+        "source": _rare_event_text(value["source"], "source", 120),
+        "is_tonight": is_tonight,
+    }
+    for field in timestamps:
+        if field in value:
+            event[field] = _rare_event_timestamp(value[field], field)
+    if "direction" in value:
+        if (
+            not isinstance(value["direction"], str)
+            or value["direction"] not in _RARE_EVENT_DIRECTIONS
+        ):
+            raise ValueError("Rare event direction is invalid")
+        event["direction"] = value["direction"]
+    if "altitude_degrees" in value:
+        event["altitude_degrees"] = _rare_event_number(
+            value["altitude_degrees"], "altitude_degrees", -90, 90
+        )
+    if "azimuth_degrees" in value:
+        azimuth = _rare_event_number(
+            value["azimuth_degrees"], "azimuth_degrees", 0, 360
+        )
+        if float(azimuth) >= 360:
+            raise ValueError("Rare event azimuth_degrees is out of range")
+        event["azimuth_degrees"] = azimuth
+    if "separation_degrees" in value:
+        event["separation_degrees"] = _rare_event_number(
+            value["separation_degrees"], "separation_degrees", 0, 180
+        )
+    return event
+
+
+def _rare_events_metadata(
+    view: dict[str, Any],
+) -> tuple[tuple[dict[str, Any], ...], str | None, str | None]:
+    fields = ("rare_events", "rare_events_generated_at", "rare_events_digest")
+    present = tuple(field in view for field in fields)
+    if not any(present):
+        return (), None, None
+    if not all(present):
+        raise ValueError("Rare event metadata is incomplete")
+    values = view["rare_events"]
+    if not isinstance(values, list) or len(values) > _RARE_EVENT_LIMIT:
+        raise ValueError("Rare event list is invalid")
+    events = tuple(_validate_rare_event(value) for value in values)
+    ids = [event["id"] for event in events]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Rare event ids must be unique")
+    raw_generated_at = view["rare_events_generated_at"]
+    if not isinstance(raw_generated_at, str) or len(raw_generated_at) > 80:
+        raise ValueError("Rare event generation time is invalid")
+    generated_at = _canonical_timestamp(raw_generated_at)
+    if generated_at is None:
+        raise ValueError("Rare event generation time is invalid")
+    digest = view["rare_events_digest"]
+    if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+        raise ValueError("Rare event digest is invalid")
+    canonical = json.dumps(
+        list(events),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest() != digest:
+        raise ValueError("Rare event digest does not match its event list")
+    return events, generated_at, digest
 
 
 def _load_committed_preview(
@@ -1018,6 +1226,9 @@ def _load_committed_preview(
     sunrise_time: str | None = None
     night_date: str | None = None
     featured_constellation: str | None = None
+    rare_events: tuple[dict[str, Any], ...] = ()
+    rare_events_generated_at: str | None = None
+    rare_events_digest: str | None = None
     view = manifest.get("view")
     if isinstance(view, dict):
         degrees = view.get("direction_degrees")
@@ -1036,6 +1247,11 @@ def _load_committed_preview(
             and featured.isprintable()
         ):
             featured_constellation = featured
+        (
+            rare_events,
+            rare_events_generated_at,
+            rare_events_digest,
+        ) = _rare_events_metadata(view)
     recipe_sha256: str | None = None
     if mode == "uploaded-photo":
         photo = manifest.get("photo")
@@ -1055,6 +1271,9 @@ def _load_committed_preview(
         sunrise_time=sunrise_time,
         night_date=night_date,
         featured_constellation=featured_constellation,
+        rare_events=rare_events,
+        rare_events_generated_at=rare_events_generated_at,
+        rare_events_digest=rare_events_digest,
         recipe_sha256=recipe_sha256,
     )
 
@@ -1301,6 +1520,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                             "sunrise_time": None,
                             "night_date": None,
                             "featured_constellation": None,
+                            "rare_events": [],
+                            "rare_events_generated_at": None,
+                            "rare_events_digest": None,
                         }
                     ),
                 )
@@ -1318,6 +1540,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                         "sunrise_time": preview.sunrise_time,
                         "night_date": preview.night_date,
                         "featured_constellation": preview.featured_constellation,
+                        "rare_events": list(preview.rare_events),
+                        "rare_events_generated_at": preview.rare_events_generated_at,
+                        "rare_events_digest": preview.rare_events_digest,
                     }
                 ),
             )

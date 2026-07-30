@@ -29,7 +29,10 @@ from display_simulator.sources.starmap import (
     _INK_YELLOW,
     _ATLAS_PALETTE,
     _BATTERY_RESERVE,
+    _PANEL_LEFT,
+    _PANEL_RIGHT,
     _PLANET_VISUALS,
+    _SKY_BOX,
     MoonDetails,
     ObservingNight,
     PlanetPosition,
@@ -40,6 +43,7 @@ from display_simulator.sources.starmap import (
     _angular_distance,
     _colorful_plot_style,
     _draw_planet_icon,
+    _draw_event_overlay,
     _draw_planetarium_panel,
     _fit_text,
     _map_point,
@@ -51,6 +55,7 @@ from display_simulator.sources.starmap import (
     _stellar_color,
     _viewing_instruction,
 )
+from display_simulator.sources.sky_events import SkyEvent
 from display_simulator.avian_capture import DEMO_SPECIES
 
 
@@ -444,6 +449,59 @@ class SourceTests(unittest.TestCase):
 
         reserve = image.crop(_BATTERY_RESERVE)
         self.assertEqual(set(reserve.getdata()), {ImageColor.getrgb(_INK_BLACK)})
+
+    def test_rare_event_replaces_guide_target_and_uses_palette_safe_accent(self):
+        zone = ZoneInfo("America/Denver")
+        night = ObservingNight(
+            rendered_at=datetime(2026, 7, 29, 20, 20, tzinfo=zone),
+            observation_time=datetime(2026, 7, 29, 22, 13, tzinfo=zone),
+            sunset=datetime(2026, 7, 29, 20, 43, tzinfo=zone),
+            sunrise=datetime(2026, 7, 30, 6, 23, tzinfo=zone),
+            night_date=date(2026, 7, 29),
+        )
+        event = SkyEvent(
+            id="aurora:20260730T0315",
+            kind="aurora",
+            title="Aurora may be visible",
+            timing="NOAA forecast near 9:15 PM",
+            detail="Face north from a clear, dark location",
+            priority=91,
+            confidence="medium",
+            source="NOAA SWPC OVATION",
+            is_tonight=True,
+            direction="N",
+        )
+        guide = PlanetariumGuide(
+            night=night,
+            direction=180,
+            planets=(),
+            moon=MoonDetails("Full Moon", 180, 1, -10, 0, 0, 0),
+            featured=None,
+            target=None,
+            events=(event,),
+        )
+        image = Image.new("RGB", (1600, 1200), _INK_BLACK)
+
+        _draw_event_overlay(image, event, None, (1600, 1600), 180)
+        _draw_planetarium_panel(
+            image,
+            RenderContext(
+                Orientation.LANDSCAPE,
+                night.rendered_at,
+                "Provo, Utah",
+            ),
+            guide,
+            Path("/missing-font-library"),
+        )
+
+        panel_alert = image.crop((_PANEL_LEFT, 390, _PANEL_RIGHT, 552))
+        sky = image.crop(_SKY_BOX)
+        self.assertIn(ImageColor.getrgb(_INK_YELLOW), set(panel_alert.getdata()))
+        self.assertIn(ImageColor.getrgb(_INK_GREEN), set(sky.getdata()))
+        self.assertEqual(
+            set(image.crop(_BATTERY_RESERVE).getdata()),
+            {ImageColor.getrgb(_INK_BLACK)},
+        )
 
     @unittest.skipUnless(importlib.util.find_spec("starplot"), "Starplot is optional")
     def test_atlas_style_constructs_with_supported_starplot_api(self):

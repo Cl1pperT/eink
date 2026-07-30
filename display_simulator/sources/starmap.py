@@ -16,6 +16,12 @@ from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
 from ..models import RenderContext
 from ..repositories import PROJECT_ROOT, find_repository
 from .drawing import font
+from .sky_events import (
+    SkyEvent,
+    SkyEventReport,
+    collect_sky_events,
+    featured_event as _select_featured_event,
+)
 
 # Star maps are rendered to PNG inside the simulator's worker thread. On macOS,
 # Matplotlib otherwise selects TkAgg and tries to create a second Tk GUI from
@@ -284,6 +290,11 @@ class PlanetariumGuide:
     moon: MoonDetails
     featured: SkyFeature | None
     target: GuideTarget | None
+    events: tuple[SkyEvent, ...] = ()
+
+    @property
+    def featured_event(self) -> SkyEvent | None:
+        return _select_featured_event(self.events, self.night)
 
 
 SolarEventsProvider = Callable[[date], dict[str, datetime]]
@@ -570,6 +581,7 @@ def _build_planetarium_guide(
     planets: tuple[PlanetPosition, ...],
     moon: MoonDetails,
     constellation_features: tuple[SkyFeature, ...],
+    events: tuple[SkyEvent, ...] = (),
 ) -> PlanetariumGuide:
     featured = _select_featured_constellation(constellation_features, direction)
     return PlanetariumGuide(
@@ -579,6 +591,7 @@ def _build_planetarium_guide(
         moon=moon,
         featured=featured,
         target=_select_guide_target(planets, featured, direction),
+        events=events,
     )
 
 
@@ -877,6 +890,152 @@ def _draw_cardinal_labels(
         )
 
 
+def _event_map_point(
+    plot,
+    raw_size: tuple[int, int],
+    direction: int,
+    coordinate: tuple[float, float],
+    *,
+    radius: float = 18,
+) -> tuple[int, int] | None:
+    try:
+        raw_point = _plot_pixel(plot, coordinate[0], coordinate[1], raw_size)
+        if not all(math.isfinite(value) for value in raw_point):
+            return None
+        return _keep_inside_sky(
+            _map_point(raw_point, raw_size, direction),
+            radius,
+        )
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _draw_event_overlay(
+    image: Image.Image,
+    event: SkyEvent | None,
+    plot,
+    raw_size: tuple[int, int],
+    direction: int,
+    *,
+    moon_point: tuple[int, int] | None = None,
+) -> None:
+    """Add one restrained, exact-palette alert mark to the circular atlas."""
+    if event is None or not event.is_tonight:
+        return
+    draw = ImageDraw.Draw(image)
+    if (
+        event.kind == "meteor"
+        and event.marker_radec is not None
+        and (event.altitude_degrees or -90) > 0
+    ):
+        center = _event_map_point(
+            plot, raw_size, direction, event.marker_radec, radius=28
+        )
+        if center is None:
+            return
+        x, y = center
+        for angle in range(0, 360, 45):
+            radians = math.radians(angle)
+            draw.line(
+                (
+                    x + round(math.cos(radians) * 9),
+                    y + round(math.sin(radians) * 9),
+                    x + round(math.cos(radians) * 25),
+                    y + round(math.sin(radians) * 25),
+                ),
+                fill=_INK_YELLOW,
+                width=3,
+            )
+        draw.ellipse((x - 5, y - 5, x + 5, y + 5), fill=_INK_WHITE)
+        return
+    if (
+        event.kind == "conjunction"
+        and event.marker_radec is not None
+        and event.secondary_marker_radec is not None
+    ):
+        first = _event_map_point(
+            plot, raw_size, direction, event.marker_radec, radius=24
+        )
+        second = _event_map_point(
+            plot,
+            raw_size,
+            direction,
+            event.secondary_marker_radec,
+            radius=24,
+        )
+        if first is None or second is None:
+            return
+        draw.line((*first, *second), fill=_INK_YELLOW, width=3)
+        for x, y in (first, second):
+            draw.ellipse(
+                (x - 17, y - 17, x + 17, y + 17),
+                outline=_INK_YELLOW,
+                width=3,
+            )
+        return
+    if event.kind == "satellite" and len(event.track_radec) >= 2:
+        points = [
+            point
+            for coordinate in event.track_radec
+            if (
+                point := _event_map_point(
+                    plot, raw_size, direction, coordinate, radius=12
+                )
+            )
+            is not None
+        ]
+        for index in range(len(points) - 1):
+            if index % 2 == 0:
+                draw.line(
+                    (*points[index], *points[index + 1]),
+                    fill=_INK_BLUE,
+                    width=5,
+                )
+        if points:
+            x, y = points[-1]
+            draw.polygon(
+                ((x, y - 9), (x - 7, y + 7), (x + 7, y + 7)),
+                fill=_INK_WHITE,
+            )
+        return
+    if event.kind == "eclipse" and "lunar" in event.title.casefold():
+        if moon_point is not None:
+            x, y = moon_point
+            draw.ellipse(
+                (x - 18, y - 18, x + 18, y + 18),
+                outline=_INK_RED,
+                width=5,
+            )
+        return
+    if event.kind == "aurora":
+        center_x = (_SKY_BOX[0] + _SKY_BOX[2]) / 2
+        center_y = (_SKY_BOX[1] + _SKY_BOX[3]) / 2
+        rotation = _DIRECTION_ROTATIONS.get(direction, 0)
+        north_angle = math.radians(_CARDINAL_BASE_ANGLES["N"] - rotation)
+        radial = (_SKY_BOX[2] - _SKY_BOX[0]) / 2 - 82
+        normal = (math.cos(north_angle), math.sin(north_angle))
+        tangent = (-normal[1], normal[0])
+        base_x = center_x + normal[0] * radial
+        base_y = center_y + normal[1] * radial
+        for index, length in enumerate((82, 112, 138, 104, 72)):
+            offset = (index - 2) * 18
+            x = base_x + tangent[0] * offset
+            y = base_y + tangent[1] * offset
+            draw.line(
+                (
+                    round(x - tangent[0] * length / 2),
+                    round(y - tangent[1] * length / 2),
+                    round(x + normal[0] * (20 + index * 5)),
+                    round(y + normal[1] * (20 + index * 5)),
+                    round(x + tangent[0] * length / 2),
+                    round(y + tangent[1] * length / 2),
+                ),
+                fill=_INK_GREEN,
+                width=4,
+                joint="curve",
+            )
+
+
 def _draw_compass(
     image: Image.Image,
     center: tuple[int, int],
@@ -952,23 +1111,84 @@ def _draw_planetarium_panel(
     draw.text((sunrise_x, 338), _format_clock(guide.night.sunrise), font=semibold(19), fill=_INK_WHITE)
     draw.line((_PANEL_LEFT, 379, _PANEL_RIGHT, 379), fill=_INK_WHITE, width=1)
 
-    draw.text((_PANEL_LEFT, 397), "BEST OBJECT TO FIND", font=bold(13), fill=_INK_WHITE)
-    if guide.target is None:
-        draw.text((_PANEL_LEFT, 426), "Explore overhead", font=display(31), fill=_INK_WHITE)
-        instruction = "Use the compass and star colors"
-    else:
-        draw.text((_PANEL_LEFT, 426), guide.target.name, font=display(32), fill=_INK_WHITE)
-        instruction = _viewing_instruction(
-            guide.target.azimuth,
-            guide.target.altitude,
+    alert = guide.featured_event
+    if alert is not None:
+        heading = f"SKY EVENT · {alert.kind.upper()}"
+        draw.text((_PANEL_LEFT, 397), heading, font=bold(13), fill=_INK_YELLOW)
+        title_font = display(30)
+        draw.text(
+            (_PANEL_LEFT, 426),
+            _fit_text(
+                draw,
+                alert.title,
+                title_font,
+                _PANEL_RIGHT - _PANEL_LEFT,
+            ),
+            font=title_font,
+            fill=_INK_WHITE,
         )
-    draw.text((_PANEL_LEFT, 472), instruction, font=semibold(18), fill=_INK_WHITE)
-    draw.text(
-        (_PANEL_LEFT, 503),
-        "Charted for 90 minutes after sunset",
-        font=regular(14),
-        fill=_INK_WHITE,
-    )
+        timing_font = semibold(17)
+        draw.text(
+            (_PANEL_LEFT, 472),
+            _fit_text(
+                draw,
+                alert.timing,
+                timing_font,
+                _PANEL_RIGHT - _PANEL_LEFT,
+            ),
+            font=timing_font,
+            fill=_INK_WHITE,
+        )
+        detail_font = regular(13)
+        draw.text(
+            (_PANEL_LEFT, 503),
+            _fit_text(
+                draw,
+                alert.detail,
+                detail_font,
+                _PANEL_RIGHT - _PANEL_LEFT,
+            ),
+            font=detail_font,
+            fill=_INK_WHITE,
+        )
+    else:
+        draw.text(
+            (_PANEL_LEFT, 397),
+            "BEST OBJECT TO FIND",
+            font=bold(13),
+            fill=_INK_WHITE,
+        )
+        if guide.target is None:
+            draw.text(
+                (_PANEL_LEFT, 426),
+                "Explore overhead",
+                font=display(31),
+                fill=_INK_WHITE,
+            )
+            instruction = "Use the compass and star colors"
+        else:
+            draw.text(
+                (_PANEL_LEFT, 426),
+                guide.target.name,
+                font=display(32),
+                fill=_INK_WHITE,
+            )
+            instruction = _viewing_instruction(
+                guide.target.azimuth,
+                guide.target.altitude,
+            )
+        draw.text(
+            (_PANEL_LEFT, 472),
+            instruction,
+            font=semibold(18),
+            fill=_INK_WHITE,
+        )
+        draw.text(
+            (_PANEL_LEFT, 503),
+            "Charted for 90 minutes after sunset",
+            font=regular(14),
+            fill=_INK_WHITE,
+        )
     draw.line((_PANEL_LEFT, 552, _PANEL_RIGHT, 552), fill=_INK_WHITE, width=1)
 
     draw.text((_PANEL_LEFT, 570), "ABOVE THE HORIZON", font=bold(13), fill=_INK_WHITE)
@@ -1129,12 +1349,57 @@ class StarMapSource:
                 Constellation,
                 SkyfieldStar,
             )
+            observer_vector = plot.observer.position(plot.ephemeris_name)
+            observer_at_chart_time = observer_vector.at(
+                plot.observer.timescale
+            )
+
+            def radiant_altaz(
+                ra_degrees: float,
+                dec_degrees: float,
+            ) -> tuple[float, float]:
+                apparent = observer_at_chart_time.observe(
+                    SkyfieldStar(
+                        ra_hours=ra_degrees / 15,
+                        dec_degrees=dec_degrees,
+                    )
+                ).apparent()
+                altitude, azimuth, _distance = apparent.altaz()
+                return (
+                    float(altitude.degrees),
+                    float(azimuth.degrees) % 360,
+                )
+
+            try:
+                event_report = collect_sky_events(
+                    night,
+                    latitude=latitude,
+                    longitude=longitude,
+                    ephemeris=plot.ephemeris,
+                    observer_vector=observer_vector,
+                    timescale=plot.observer.timescale.ts,
+                    moon=moon,
+                    coordinate_converter=radiant_altaz,
+                    cache_path=context.options.get(
+                        "sky_event_cache_path"
+                    ),
+                    offline=context.offline,
+                )
+            except (KeyError, OSError, TypeError, ValueError):
+                # Rare-event feeds and calculations are an enhancement; a
+                # corrupt cache or provider failure must not strand the frame
+                # without its ordinary nightly star map.
+                event_report = SkyEventReport(
+                    generated_at=night.rendered_at,
+                    events=(),
+                )
             guide = _build_planetarium_guide(
                 night,
                 direction,
                 planets,
                 moon,
                 constellation_features,
+                event_report.events,
             )
             plot.constellations()
             if guide.featured is not None:
@@ -1181,14 +1446,28 @@ class StarMapSource:
                     float(_PLANET_VISUALS[planet.name]["size"]),
                 )
                 _draw_planet_icon(canvas, map_point, planet.name)
+            moon_map_point: tuple[int, int] | None = None
             if guide.moon.altitude > 0:
                 raw_point = _plot_pixel(plot, guide.moon.ra, guide.moon.dec, rendered.size)
-                map_point = _keep_inside_sky(
+                moon_map_point = _keep_inside_sky(
                     _map_point(raw_point, rendered.size, direction),
                     10,
                 )
-                _draw_moon_icon(canvas, map_point, 9, guide.moon.phase_angle)
+                _draw_moon_icon(
+                    canvas,
+                    moon_map_point,
+                    9,
+                    guide.moon.phase_angle,
+                )
 
+            _draw_event_overlay(
+                canvas,
+                guide.featured_event,
+                plot,
+                rendered.size,
+                direction,
+                moon_point=moon_map_point,
+            )
             _draw_cardinal_labels(canvas, direction, starplot_fonts.FONTS_PATH)
             _draw_planetarium_panel(
                 canvas,
@@ -1201,6 +1480,15 @@ class StarMapSource:
             context.options["star_night_date"] = night.night_date.isoformat()
             context.options["star_featured_constellation"] = (
                 guide.featured.name if guide.featured is not None else None
+            )
+            context.options["star_rare_events"] = (
+                event_report.manifest_events
+            )
+            context.options["star_rare_events_generated_at"] = (
+                event_report.generated_at.isoformat()
+            )
+            context.options["star_rare_events_digest"] = (
+                event_report.digest
             )
             return _snap_atlas_colors(canvas)
         finally:

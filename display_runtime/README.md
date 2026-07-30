@@ -115,12 +115,28 @@ sunset; their manifest view records that observation time and observing-night
 date separately from the actual render timestamp. The committed preview also
 records the following sunrise so the website expires the chart at the real end
 of that observing night.
+
+Each live render also calculates a bounded rare-event guide. Meteor showers
+come from a bundled major-shower calendar; conjunctions and locally visible
+eclipses are calculated offline from the installed JPL ephemeris. NOAA SWPC's
+short-lived OVATION grid supplies a local aurora estimate, while cached
+CelesTrak visual and recent-launch orbital elements supply favorable satellite
+passes, including recent Starlink passes. A provider outage never fabricates an
+alert: static astronomy remains available, stale aurora guidance is suppressed,
+and bounded last-known-good orbital elements expire. Satellite entries are
+explicitly predictions rather than brightness guarantees.
+
+The right guide replaces its ordinary suggested object with the highest-ranked
+event only when it matters tonight (or an exceptional event is less than 48
+hours away). The Stars website shows up to three notices from the same
+manifest-validated event snapshot as the preview, so its text cannot drift from
+the committed panel artwork.
 **Save & render tonight's sky** saves the selection before creating a new
 committed `star-map` frame.
 
 | Control-panel endpoint | Result |
 | --- | --- |
-| `/api/stars/summary` | Read-only availability, render/observation timestamps, observing night, featured constellation, and orientation for the committed star frame |
+| `/api/stars/summary` | Read-only availability, render/observation timestamps, observing night, featured constellation, orientation, and validated rare-event snapshot for the committed star frame |
 | `/api/stars/preview` | Manifest-validated PNG for the committed star frame, with ETag revalidation |
 
 The Overview page and Stars tab **Five-minute demo** controls select the latest
@@ -154,11 +170,20 @@ is advertised as the exact `next_wake_at`, suppressing irrelevant automatic
 schedule wakes until the saved manual mode or automatic schedule resumes.
 
 The installed timers render weather at 05:55, birds at 08:55, and tonight's
-star map at noon in the Pi's local timezone, which should match
-`location.timezone`. Weather activates at 06:00, birds at 09:00, and stars at
-astronomical sunset plus `schedule.star_sunset_offset_minutes` (30 minutes by
-default). The noon star render safely precedes winter sunset while the chart
-itself remains calculated for sunset plus 90 minutes.
+star map first at noon in the Pi's local timezone, which should match
+`location.timezone`. The Pi then refreshes the star frame at 16:20, 17:20,
+18:20, 19:20, and 20:20 local time. Keeping the noon render provides a safe
+baseline before winter sunset; the hourly evening passes improve short-lived
+NOAA aurora guidance and satellite/TLE freshness near the relevant wake across
+the full range of seasonal sunset times. Every pass still charts the sky for
+sunset plus 90 minutes.
+
+These additional star renders run only on the Raspberry Pi. They do not wake
+the ESP32, turn on its Wi-Fi radio, or refresh the e-paper panel. Weather still
+activates at 06:00, birds at 09:00, and stars at astronomical sunset plus
+`schedule.star_sunset_offset_minutes` (30 minutes by default). At that existing
+sunset-plus-30 wake, the ESP performs its unchanged manifest fetch and receives
+whichever star frame the Pi most recently committed.
 They are persistent across outages and share a lock—with phone-triggered jobs
 using that same lock—so missed or concurrent renders cannot exhaust Pi memory.
 Failed source renders retry at a bounded interval while the previous committed

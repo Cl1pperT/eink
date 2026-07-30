@@ -17,6 +17,7 @@ dependencies = [
 integrations = [
   "playwright>=1.45",
   "starplot>=0.20.4,<0.21",
+  "skyfield>=1.54,<2",
   "pytz>=2025.2",
   "pyarrow>=20,<21",
 ]

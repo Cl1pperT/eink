@@ -66,6 +66,13 @@ blue, white, gold, or red color. One prominent constellation is selected
 automatically and traced in gold. Palette-safe illustrated planets appear at
 their live positions, while a right-hand planetarium guide shows the Moon,
 sunset and sunrise, visible planets, a suggested object, compass, and color key.
+When something unusual is worth watching, the suggested-object block becomes
+a concise sky alert. The guide combines an offline major-meteor calendar,
+local JPL/Skyfield eclipse and conjunction geometry, short-lived NOAA SWPC
+aurora guidance, and cached CelesTrak pass predictions. Meteor radiants,
+conjunctions, lunar eclipses, aurora, and satellites receive restrained
+palette-safe map accents. Satellite alerts say “potentially visible” because
+orbital elements do not guarantee brightness; stale aurora data is suppressed.
 
 When those projects are checked out at `peacock/AvianVisitors` and
 `stars/integrations/inkystarmap`, the simulator and checkout-based headless CLI
@@ -91,6 +98,9 @@ compact current-frame preview and a full responsive `/birds` gallery backed by
 cached, regional BirdWeather reports and the local AvianVisitors illustrations.
 Its Stars tab safely previews the latest committed sky frame and persists a
 North, East, South, or West center direction for scheduled and manual renders.
+An accessible Sky events card shows up to three manifest-validated meteor,
+aurora, eclipse, satellite, or planetary-conjunction notices from that exact
+frame, including local timing, direction, confidence, and source.
 **Save & render tonight's sky** saves that choice and creates a new committed
 star frame. The read-only `/api/stars/summary` and `/api/stars/preview` routes
 expose only manifest-validated committed metadata and artwork.

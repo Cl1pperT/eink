@@ -170,14 +170,23 @@ class RaspberryPiInstallerTests(unittest.TestCase):
             self.assertIn("RestartSec=15min", units["eink-display-render@.service"])
 
             expected_timers = {
-                "weather": "05:55:00",
-                "birds": "08:55:00",
-                "star-map": "12:00:00",
+                "weather": ("05:55:00",),
+                "birds": ("08:55:00",),
+                "star-map": (
+                    "12:00:00",
+                    "16:20:00",
+                    "17:20:00",
+                    "18:20:00",
+                    "19:20:00",
+                    "20:20:00",
+                ),
             }
-            for mode, time_of_day in expected_timers.items():
+            for mode, times_of_day in expected_timers.items():
                 timer = units[f"eink-display-{mode}.timer"]
                 self.assertIn(f"Unit=eink-display-render@{mode}.service", timer)
-                self.assertIn(f"OnCalendar=*-*-* {time_of_day}", timer)
+                self.assertEqual(timer.count("OnCalendar="), len(times_of_day))
+                for time_of_day in times_of_day:
+                    self.assertIn(f"OnCalendar=*-*-* {time_of_day}", timer)
                 self.assertIn("Persistent=true", timer)
 
             all_other_text = "\n".join(
